@@ -15,3 +15,11 @@ class AIProvider(ABC):
     ) -> str:
         """Analyze an image and return text."""
         raise NotImplementedError
+
+    @abstractmethod
+    def generate_text(
+        self,
+        prompt: str,
+    ) -> str:
+        """Generate text from a prompt."""
+        raise NotImplementedError
