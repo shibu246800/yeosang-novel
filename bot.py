@@ -75,9 +75,11 @@ async def novel(interaction: discord.Interaction):
             headers={
                 "Authorization": f"Bearer {api_key}",
                 "Content-Type": "application/json",
+                "HTTP-Referer": "https://yeosang-novel.onrender.com",
+                "X-Title": "Yeosang Novel",
             },
             json={
-                "model": "google/gemini-2.0-flash-exp:free",
+                "model": "openrouter/free",
                 "messages": [
                     {
                         "role": "user",
@@ -92,10 +94,16 @@ async def novel(interaction: discord.Interaction):
             timeout=60,
         )
 
+        # ─────────────────────────
+        # OpenRouter error
+        # ─────────────────────────
+
         if not response.ok:
+
             print(
                 f"OPENROUTER STATUS: {response.status_code}"
             )
+
             print(
                 f"OPENROUTER RESPONSE: {response.text}"
             )
@@ -103,7 +111,12 @@ async def novel(interaction: discord.Interaction):
             await interaction.followup.send(
                 f"❌ OpenRouter error: `{response.status_code}`"
             )
+
             return
+
+        # ─────────────────────────
+        # Read AI response
+        # ─────────────────────────
 
         data = response.json()
 
@@ -115,14 +128,26 @@ async def novel(interaction: discord.Interaction):
             f"📖 **Yeosang's story brain:**\n\n{answer}"
         )
 
+    # ─────────────────────────
+    # Timeout
+    # ─────────────────────────
+
     except requests.exceptions.Timeout:
-        print("❌ OpenRouter request timed out.")
+
+        print(
+            "❌ OpenRouter request timed out."
+        )
 
         await interaction.followup.send(
             "❌ OpenRouter took too long to respond."
         )
 
+    # ─────────────────────────
+    # Unexpected error
+    # ─────────────────────────
+
     except Exception as e:
+
         print(
             f"❌ AI ERROR: {type(e).__name__}: {e}"
         )
