@@ -100,7 +100,7 @@ async def novel(
         print(f"🖼️ Received image: {board.filename}")
 
         # ─────────────────────
-        # Download image
+        # Download Discord image
         # ─────────────────────
 
         image_response = requests.get(
@@ -123,43 +123,58 @@ async def novel(
         )
 
         # ─────────────────────
-        # Vision prompt
+        # Vision instructions
         # ─────────────────────
 
         prompt = """
-You are Yeosang, an advanced AI novel-writing system.
+You are Yeosang, an advanced visual analysis and novel-writing AI.
 
 You are looking at a collection board containing character cards.
 
-THIS IS A VISUAL ANALYSIS TEST.
+THIS IS ONLY A VISUAL ANALYSIS TEST.
+
 Do NOT write a novel yet.
 
-Study the entire image carefully.
+Carefully inspect the entire uploaded image.
 
-Identify and describe:
+Identify and analyze:
 
 1. Every visible character.
-2. Their apparent gender presentation if visually clear.
-3. Hair, face, clothing, accessories, posture, expression, and other
-   distinctive visual traits.
-4. The apparent mood or personality suggested by each character's visual
-   presentation.
+2. Each character's visible appearance.
+3. Hair, face, clothing, accessories, posture, expression,
+   body language, and distinctive visual details.
+4. The apparent mood or personality suggested by the visual design.
 5. Differences and contrasts between the characters.
-6. Possible relationships or dynamics suggested by the arrangement or
-   visual design.
-7. Important objects, symbols, backgrounds, locations, colors, or motifs.
+6. Possible relationships or character dynamics suggested by
+   the visual material.
+7. Important objects, symbols, locations, backgrounds, and motifs.
 8. The overall atmosphere and aesthetic of the collection.
 
-IMPORTANT:
+IMPORTANT RULES:
 
-- Do not claim something is certain if the image does not clearly show it.
-- Separate direct visual observations from interpretation.
+- Only claim something is visually supported when the image actually
+  provides evidence.
+- Clearly distinguish observation from interpretation.
 - Do not invent character names.
-- Do not assume existing canon or fandom information.
-- Do not write a story yet.
+- Do not assume canon or fandom information.
+- Do not write the novel.
+- Do not summarize the request.
+- Actually analyze the image.
 
-Organize your answer clearly by character, followed by the overall
-collection analysis.
+Organize the response as:
+
+CHARACTERS
+- Character 1
+- Character 2
+- etc.
+
+RELATIONSHIP / DYNAMIC CLUES
+
+IMPORTANT VISUAL ELEMENTS
+
+OVERALL ATMOSPHERE
+
+POSSIBLE STORY POTENTIAL
 """
 
         # ─────────────────────
@@ -175,7 +190,7 @@ collection analysis.
                 "X-Title": "Yeosang Novel",
             },
             json={
-                "model": "qwen/qwen3.8-27b:free",
+                "model": "nvidia/nemotron-3-nano-omni:free",
                 "messages": [
                     {
                         "role": "user",
@@ -228,7 +243,7 @@ collection analysis.
         print("✅ Vision analysis successful.")
 
         # ─────────────────────
-        # Discord message limit
+        # Send result to Discord
         # ─────────────────────
 
         max_length = 1900
