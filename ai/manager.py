@@ -8,7 +8,8 @@ class AIManager:
     """
     Controls Yeosang Novel's AI providers.
 
-    Providers are tried in priority order.
+    Gemini is tried first.
+    OpenRouter is the fallback.
     """
 
     def __init__(self):
@@ -46,12 +47,33 @@ class AIManager:
         prompt: str,
     ):
 
+        return self._run(
+            "analyze_image",
+            image_bytes=image_bytes,
+            mime_type=mime_type,
+            prompt=prompt,
+        )
+
+    def generate_text(
+        self,
+        prompt: str,
+    ):
+
+        return self._run(
+            "generate_text",
+            prompt=prompt,
+        )
+
+    def _run(
+        self,
+        method_name,
+        **kwargs,
+    ):
+
         if not self.providers:
 
             raise RuntimeError(
-                "No AI providers are configured. "
-                "Add GEMINI_API_KEY or "
-                "OPENROUTER_API_KEY to Render."
+                "No AI providers are configured."
             )
 
         errors = []
@@ -65,15 +87,18 @@ class AIManager:
 
             try:
 
-                result = provider.analyze_image(
-                    image_bytes=image_bytes,
-                    mime_type=mime_type,
-                    prompt=prompt,
+                method = getattr(
+                    provider,
+                    method_name,
+                )
+
+                result = method(
+                    **kwargs
                 )
 
                 print(
-                    f"✅ AI Manager succeeded with "
-                    f"{provider.name}"
+                    f"✅ AI Manager succeeded "
+                    f"with {provider.name}"
                 )
 
                 return result, provider.name
