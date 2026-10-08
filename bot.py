@@ -8,6 +8,7 @@ from discord.ext import commands
 from flask import Flask
 
 from ai.manager import AIManager
+from ai.storyteller import Storyteller
 
 
 # ═════════════════════════════════════
@@ -19,6 +20,7 @@ app = Flask(__name__)
 
 @app.route("/")
 def home():
+
     return "Yeosang Novel is alive. 🖤"
 
 
@@ -52,91 +54,81 @@ bot = commands.Bot(
 
 
 # ═════════════════════════════════════
-# AI MANAGER
+# AI SYSTEM
 # ═════════════════════════════════════
 
 ai_manager = AIManager()
 
+storyteller = Storyteller(
+    ai_manager
+)
+
 
 # ═════════════════════════════════════
-# IMAGE PROMPT
+# VISUAL ANALYSIS PROMPT
 # ═════════════════════════════════════
 
 VISUAL_ANALYSIS_PROMPT = """
-You are Yeosang, the visual-analysis brain of
-an advanced AI novel-writing system.
+You are the visual-analysis brain of Yeosang Novel.
 
-This is a collection board containing character cards.
+Actually inspect the uploaded collection board.
 
-THIS IS A VISUAL ANALYSIS TEST.
-
-Actually inspect the uploaded image carefully.
-
-Do NOT write a novel yet.
+Do NOT write a novel.
 
 Do NOT give a safety classification.
 
 Do NOT simply answer "safe".
 
-Analyze the visible characters and the visual storytelling
-potential of the board.
+Your job is to create useful visual evidence for another
+AI that will later invent stories.
 
-For EVERY visible character, identify only what can reasonably
-be observed from the image.
+For EVERY visible character, identify what can reasonably
+be observed.
 
 Analyze:
 
-1. Character appearance
-   - hair
-   - clothing
-   - accessories
-   - expression
-   - posture
-   - body language
-   - distinctive visual details
+1. Appearance
+2. Clothing
+3. Accessories
+4. Expression
+5. Posture
+6. Body language
+7. Distinctive visual details
+8. Personality clues suggested by presentation
+9. Emotional clues
+10. Possible relationship clues
+11. Important objects
+12. Symbols and motifs
+13. Background and setting clues
+14. Overall atmosphere
+15. Storytelling possibilities
 
-2. Personality clues suggested by their presentation.
+IMPORTANT:
 
-3. Emotional clues.
-
-4. Contrasts between characters.
-
-5. Possible relationship or dynamic clues.
-
-6. Important objects.
-
-7. Symbols and motifs.
-
-8. Background and setting clues.
-
-9. Overall atmosphere.
-
-10. Story potential.
-
-IMPORTANT RULES:
-
-- Actually inspect the image.
-- Do not invent character names.
+- Do not invent names.
 - Do not assume fandom canon.
 - Do not identify real people.
 - Do not claim unseen facts.
-- Separate visible observations from interpretation.
+- Clearly distinguish observation from interpretation.
 - If something cannot be determined, say so.
-- Do not write the actual novel yet.
 
 Use this structure:
 
 CHARACTER 1
+
 Appearance:
 Personality clues:
 Emotional clues:
 Distinctive details:
+Possible narrative significance:
 
 CHARACTER 2
+
 Appearance:
 Personality clues:
 Emotional clues:
 Distinctive details:
+Possible narrative significance:
 
 Continue for every visible character.
 
@@ -144,9 +136,11 @@ RELATIONSHIP / DYNAMIC CLUES
 
 IMPORTANT VISUAL ELEMENTS
 
+SETTING CLUES
+
 OVERALL ATMOSPHERE
 
-POSSIBLE STORY POTENTIAL
+POSSIBLE STORY INGREDIENTS
 """
 
 
@@ -188,10 +182,10 @@ async def on_ready():
 
 @bot.tree.command(
     name="novel",
-    description="Analyze a collection board for a novel."
+    description="Turn a collection board into story ideas."
 )
 @app_commands.describe(
-    board="Upload the collection board you want Yeosang to analyze."
+    board="Upload the collection board you want Yeosang to use."
 )
 async def novel(
     interaction: discord.Interaction,
@@ -300,13 +294,18 @@ async def novel(
             "image/jpeg"
         )
 
-    # ─────────────────────────────────
-    # AI ANALYSIS
-    # ─────────────────────────────────
+    # ═════════════════════════════════
+    # STAGE 1
+    # VISUAL ANALYSIS
+    # ═════════════════════════════════
+
+    print(
+        "👁️ Stage 1: visual analysis"
+    )
 
     try:
 
-        analysis, provider_name = (
+        visual_analysis, vision_provider = (
             ai_manager.analyze_image(
                 image_bytes=image_bytes,
                 mime_type=mime_type,
@@ -317,42 +316,76 @@ async def novel(
     except Exception as error:
 
         print(
-            f"❌ All AI providers failed: "
+            f"❌ Visual analysis failed: "
             f"{error}"
         )
 
         await interaction.followup.send(
-            "❌ Yeosang couldn't analyze "
-            "this collection board.\n\n"
+            "❌ Yeosang couldn't understand "
+            "the collection board.\n\n"
             f"`{error}`"
         )
 
         return
 
-    # ─────────────────────────────────
+    # ═════════════════════════════════
+    # STAGE 2
+    # STORY BRAIN
+    # ═════════════════════════════════
+
+    print(
+        "🧠 Stage 2: story brainstorming"
+    )
+
+    try:
+
+        story_ideas, story_provider = (
+            storyteller.brainstorm(
+                visual_analysis
+            )
+        )
+
+    except Exception as error:
+
+        print(
+            f"❌ Story Brain failed: "
+            f"{error}"
+        )
+
+        await interaction.followup.send(
+            "❌ Yeosang understood the "
+            "collection, but couldn't turn "
+            "it into story possibilities.\n\n"
+            f"`{error}`"
+        )
+
+        return
+
+    # ═════════════════════════════════
     # RESULT
-    # ─────────────────────────────────
+    # ═════════════════════════════════
 
     header = (
-        "👁️ **Yeosang's Visual Analysis**\n"
-        f"*Provider: {provider_name}*\n\n"
+        "🧠 **Yeosang's Story Brain**\n"
+        f"*Vision: {vision_provider}*\n"
+        f"*Story Brain: {story_provider}*\n\n"
     )
 
     first_limit = 1900 - len(header)
 
-    if len(analysis) <= first_limit:
+    if len(story_ideas) <= first_limit:
 
         await interaction.followup.send(
-            header + analysis
+            header + story_ideas
         )
 
         return
 
     await interaction.followup.send(
-        header + analysis[:first_limit]
+        header + story_ideas[:first_limit]
     )
 
-    remaining = analysis[first_limit:]
+    remaining = story_ideas[first_limit:]
 
     while remaining:
 
