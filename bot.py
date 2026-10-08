@@ -98,26 +98,8 @@ async def novel(
         return
 
     # ─────────────────────────
-    # Check attachment
+    # Check image
     # ─────────────────────────
-
-    print(
-        f"🖼️ Received attachment: {board.filename}"
-    )
-
-    print(
-        f"📦 Content type: {board.content_type}"
-    )
-
-    print(
-        f"📏 File size: {board.size} bytes"
-    )
-
-    # Discord normally supplies image/jpeg,
-    # image/png, image/webp, etc.
-    #
-    # We also check the filename because Discord
-    # can occasionally return a missing content type.
 
     filename = board.filename.lower()
 
@@ -130,44 +112,60 @@ async def novel(
     )
 
     is_image = (
-        board.content_type
-        and board.content_type.startswith("image/")
-    ) or filename.endswith(allowed_extensions)
+        (
+            board.content_type
+            and board.content_type.startswith("image/")
+        )
+        or filename.endswith(allowed_extensions)
+    )
 
     if not is_image:
 
         await interaction.followup.send(
-            "❌ Please upload an image "
-            "(PNG, JPG, JPEG, WEBP, or GIF)."
+            "❌ Please upload a PNG, JPG, JPEG, WEBP, or GIF image."
         )
 
         return
+
+    print(
+        f"🖼️ Received image: {board.filename}"
+    )
+
+    print(
+        f"📦 Content type: {board.content_type}"
+    )
+
+    print(
+        f"📏 Size: {board.size} bytes"
+    )
 
     # ─────────────────────────
     # Vision prompt
     # ─────────────────────────
 
     prompt = """
-You are Yeosang, an advanced visual-analysis system
-for an AI novel-writing application.
+You are Yeosang, the visual-analysis brain of an
+advanced AI novel-writing system.
 
-You are looking at a collection board containing
+You have been given a collection board containing
 character cards.
 
 THIS IS A VISUAL ANALYSIS TEST.
 
-Do NOT write a novel yet.
+Do NOT write a novel.
 
-Study the uploaded image carefully.
+Do NOT give a safety classification.
 
-Your task is to extract useful information that a
-future novel-writing system can use.
+Actually inspect the uploaded image.
+
+Study every visible character and every useful visual
+detail.
 
 Analyze:
 
 1. EVERY visible character.
 
-2. Each character's visible appearance:
+2. Appearance:
    - face
    - hair
    - clothing
@@ -175,39 +173,35 @@ Analyze:
    - posture
    - expression
    - body language
-   - distinctive visual details
+   - distinctive features
 
-3. Personality clues suggested by the visual design.
+3. Personality clues suggested by appearance.
 
 4. Emotional clues.
 
 5. Differences and contrasts between characters.
 
-6. Possible relationship or character-dynamic clues
-   suggested by the visual material.
+6. Possible relationship or dynamic clues.
 
 7. Important objects.
 
-8. Symbols.
+8. Symbols and motifs.
 
 9. Backgrounds and possible locations.
 
-10. Recurring visual motifs.
+10. The overall aesthetic and atmosphere.
 
-11. The overall atmosphere and aesthetic.
+11. Possible story potential.
 
-IMPORTANT RULES:
+IMPORTANT:
 
-- Actually inspect the image.
-- Do not simply say that the image is safe.
-- Do not respond with a safety classification.
-- Do not write the novel.
-- Do not invent character names.
+- Do not invent names.
 - Do not assume fandom canon.
-- Do not claim uncertain details as facts.
-- Clearly distinguish observation from interpretation.
-- If something cannot be determined from the image,
-  say that it cannot be determined.
+- Do not invent facts that cannot be seen.
+- Separate observation from interpretation.
+- If something is unclear, say so.
+- Do not simply say "safe".
+- Actually describe what you see.
 
 Use this structure:
 
@@ -235,8 +229,31 @@ POSSIBLE STORY POTENTIAL
 """
 
     # ─────────────────────────
-    # OpenRouter request
+    # OpenRouter Responses API
     # ─────────────────────────
+
+    payload = {
+        "model": "openrouter/free",
+
+        "input": [
+            {
+                "role": "user",
+
+                "content": [
+                    {
+                        "type": "input_text",
+                        "text": prompt,
+                    },
+
+                    {
+                        "type": "input_image",
+
+                        "image_url": board.url,
+                    },
+                ],
+            }
+        ],
+    }
 
     try:
 
@@ -246,7 +263,7 @@ POSSIBLE STORY POTENTIAL
 
         response = requests.post(
 
-            "https://openrouter.ai/api/v1/chat/completions",
+            "https://openrouter.ai/api/v1/responses",
 
             headers={
                 "Authorization": f"Bearer {api_key}",
@@ -257,45 +274,13 @@ POSSIBLE STORY POTENTIAL
                 "X-Title": "Yeosang Novel",
             },
 
-            json={
-
-                "model": (
-                    "nvidia/"
-                    "nemotron-3-nano-omni:free"
-                ),
-
-                "messages": [
-
-                    {
-                        "role": "user",
-
-                        "content": [
-
-                            {
-                                "type": "text",
-                                "text": prompt,
-                            },
-
-                            {
-                                "type": "image_url",
-
-                                "image_url": {
-                                    "url": board.url
-                                },
-                            },
-
-                        ],
-                    }
-
-                ],
-
-            },
+            json=payload,
 
             timeout=120,
         )
 
         # ─────────────────────
-        # Print complete response
+        # Always print response
         # ─────────────────────
 
         print(
@@ -309,19 +294,18 @@ POSSIBLE STORY POTENTIAL
         )
 
         # ─────────────────────
-        # OpenRouter error
+        # Error
         # ─────────────────────
 
         if not response.ok:
 
             error_text = response.text
 
-            # Keep Discord message under its limit.
             if len(error_text) > 1500:
                 error_text = error_text[:1500]
 
             await interaction.followup.send(
-                "❌ **OpenRouter rejected the vision request.**\n\n"
+                "❌ **OpenRouter rejected the request.**\n\n"
                 f"Status: `{response.status_code}`\n"
                 f"```json\n{error_text}\n```"
             )
@@ -329,7 +313,7 @@ POSSIBLE STORY POTENTIAL
             return
 
         # ─────────────────────
-        # Parse response
+        # Parse JSON
         # ─────────────────────
 
         try:
@@ -339,46 +323,65 @@ POSSIBLE STORY POTENTIAL
         except ValueError:
 
             await interaction.followup.send(
-                "❌ OpenRouter returned an invalid response."
+                "❌ OpenRouter returned invalid JSON."
             )
 
             return
 
         # ─────────────────────
-        # Extract answer safely
+        # Extract Responses API
+        # output
         # ─────────────────────
 
-        choices = data.get("choices")
+        answer = None
 
-        if not choices:
+        # Standard Responses API output
+        output = data.get("output", [])
 
-            print(
-                "❌ No choices returned by OpenRouter."
+        for item in output:
+
+            if item.get("type") != "message":
+                continue
+
+            content = item.get(
+                "content",
+                []
             )
 
-            await interaction.followup.send(
-                "❌ OpenRouter returned no AI response."
-            )
+            for content_item in content:
 
-            return
+                if content_item.get("type") in (
+                    "output_text",
+                    "text",
+                ):
 
-        message = choices[0].get(
-            "message",
-            {}
-        )
+                    answer = content_item.get(
+                        "text"
+                    )
 
-        answer = message.get(
-            "content"
-        )
+                    if answer:
+                        break
+
+            if answer:
+                break
+
+        # ─────────────────────
+        # Fallback
+        # ─────────────────────
 
         if not answer:
 
             print(
-                f"❌ Unexpected AI response: {data}"
+                "❌ Could not find text in response."
+            )
+
+            print(
+                f"FULL DATA: {data}"
             )
 
             await interaction.followup.send(
-                "❌ The AI returned an empty response."
+                "❌ The AI responded, but I couldn't "
+                "extract its analysis."
             )
 
             return
@@ -388,7 +391,7 @@ POSSIBLE STORY POTENTIAL
         )
 
         # ─────────────────────
-        # Send analysis
+        # Discord message limit
         # ─────────────────────
 
         max_length = 1900
@@ -451,7 +454,7 @@ POSSIBLE STORY POTENTIAL
         )
 
     # ─────────────────────────
-    # Unexpected error
+    # General error
     # ─────────────────────────
 
     except Exception as e:
