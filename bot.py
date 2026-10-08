@@ -1,5 +1,6 @@
 import os
 import threading
+import base64
 
 import discord
 import requests
@@ -77,34 +78,29 @@ async def novel(
         return
 
     # ─────────────────────────
-    # Check file type
+    # Check image type
     # ─────────────────────────
 
-    allowed_types = (
+    allowed_types = {
         "image/png",
         "image/jpeg",
         "image/jpg",
         "image/webp",
         "image/gif",
-    )
+    }
 
     if board.content_type not in allowed_types:
-
         await interaction.followup.send(
-            "❌ Please upload an image file "
-            "(PNG, JPG, JPEG, WEBP, or GIF)."
+            "❌ Please upload a PNG, JPG, JPEG, WEBP, or GIF image."
         )
-
         return
 
     try:
 
-        print(
-            f"🖼️ Received image: {board.filename}"
-        )
+        print(f"🖼️ Received image: {board.filename}")
 
         # ─────────────────────
-        # Download Discord image
+        # Download image
         # ─────────────────────
 
         image_response = requests.get(
@@ -115,19 +111,15 @@ async def novel(
         image_response.raise_for_status()
 
         # ─────────────────────
-        # Convert image to base64
+        # Convert image to Base64
         # ─────────────────────
-
-        import base64
 
         image_base64 = base64.b64encode(
             image_response.content
         ).decode("utf-8")
 
-        mime_type = board.content_type
-
         image_data_url = (
-            f"data:{mime_type};base64,{image_base64}"
+            f"data:{board.content_type};base64,{image_base64}"
         )
 
         # ─────────────────────
@@ -137,29 +129,37 @@ async def novel(
         prompt = """
 You are Yeosang, an advanced AI novel-writing system.
 
-Analyze the uploaded collection board carefully.
+You are looking at a collection board containing character cards.
 
-This is NOT yet a request to write the novel.
+THIS IS A VISUAL ANALYSIS TEST.
+Do NOT write a novel yet.
 
-Your job is to study the visual material and identify:
+Study the entire image carefully.
+
+Identify and describe:
 
 1. Every visible character.
-2. Their apparent visual traits.
-3. Clothing and styling.
-4. Distinctive accessories or objects.
-5. Apparent personality clues suggested by their appearance.
-6. The relationships or contrasts that could exist between the characters.
-7. The overall atmosphere and aesthetic of the collection.
-8. Any symbols, locations, objects, or visual details that could become
-   important story elements.
+2. Their apparent gender presentation if visually clear.
+3. Hair, face, clothing, accessories, posture, expression, and other
+   distinctive visual traits.
+4. The apparent mood or personality suggested by each character's visual
+   presentation.
+5. Differences and contrasts between the characters.
+6. Possible relationships or dynamics suggested by the arrangement or
+   visual design.
+7. Important objects, symbols, backgrounds, locations, colors, or motifs.
+8. The overall atmosphere and aesthetic of the collection.
 
-Do not invent names if they are not visible or provided.
+IMPORTANT:
 
-Separate what you can directly observe from what you are interpreting.
+- Do not claim something is certain if the image does not clearly show it.
+- Separate direct visual observations from interpretation.
+- Do not invent character names.
+- Do not assume existing canon or fandom information.
+- Do not write a story yet.
 
-Write a detailed but organized visual analysis.
-
-Do NOT write the novel yet.
+Organize your answer clearly by character, followed by the overall
+collection analysis.
 """
 
         # ─────────────────────
@@ -175,7 +175,7 @@ Do NOT write the novel yet.
                 "X-Title": "Yeosang Novel",
             },
             json={
-                "model": "openrouter/free",
+                "model": "qwen/qwen3.8-27b:free",
                 "messages": [
                     {
                         "role": "user",
@@ -218,22 +218,22 @@ Do NOT write the novel yet.
             return
 
         # ─────────────────────
-        # Read response
+        # Read AI response
         # ─────────────────────
 
         data = response.json()
 
         answer = data["choices"][0]["message"]["content"]
 
-        print(
-            "✅ Vision analysis successful."
-        )
+        print("✅ Vision analysis successful.")
 
         # ─────────────────────
         # Discord message limit
         # ─────────────────────
 
-        if len(answer) <= 1900:
+        max_length = 1900
+
+        if len(answer) <= max_length:
 
             await interaction.followup.send(
                 f"👁️ **Yeosang's Visual Analysis**\n\n{answer}"
@@ -241,10 +241,13 @@ Do NOT write the novel yet.
 
         else:
 
-            # Split long AI response into Discord-safe chunks.
             chunks = [
-                answer[i:i + 1900]
-                for i in range(0, len(answer), 1900)
+                answer[i:i + max_length]
+                for i in range(
+                    0,
+                    len(answer),
+                    max_length
+                )
             ]
 
             await interaction.followup.send(
@@ -252,10 +255,7 @@ Do NOT write the novel yet.
             )
 
             for chunk in chunks[1:]:
-
-                await interaction.followup.send(
-                    chunk
-                )
+                await interaction.followup.send(chunk)
 
     # ─────────────────────────
     # Timeout
