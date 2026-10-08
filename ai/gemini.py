@@ -25,6 +25,10 @@ class GeminiProvider(AIProvider):
     def __init__(self, api_key: str):
         self.api_key = api_key
 
+    # ═════════════════════════════════════
+    # IMAGE ANALYSIS
+    # ═════════════════════════════════════
+
     def analyze_image(
         self,
         image_bytes: bytes,
@@ -42,7 +46,6 @@ class GeminiProvider(AIProvider):
 
             payload = {
                 "model": model,
-
                 "input": [
                     {
                         "type": "user_input",
@@ -106,20 +109,13 @@ class GeminiProvider(AIProvider):
                 if answer:
 
                     print(
-                        f"✅ Gemini succeeded: "
-                        f"{model}"
+                        f"✅ Gemini succeeded: {model}"
                     )
 
                     return answer
 
                 last_error = (
-                    f"{model}: "
-                    "empty response"
-                )
-
-                print(
-                    f"⚠️ {model} returned "
-                    "no usable text."
+                    f"{model}: empty response"
                 )
 
             except requests.exceptions.Timeout:
@@ -139,8 +135,7 @@ class GeminiProvider(AIProvider):
                 )
 
                 print(
-                    f"❌ Gemini request error: "
-                    f"{error}"
+                    f"❌ Gemini request error: {error}"
                 )
 
             except ValueError as error:
@@ -150,8 +145,7 @@ class GeminiProvider(AIProvider):
                 )
 
                 print(
-                    f"❌ Invalid Gemini JSON: "
-                    f"{error}"
+                    f"❌ Invalid Gemini JSON: {error}"
                 )
 
         raise RuntimeError(
@@ -159,14 +153,118 @@ class GeminiProvider(AIProvider):
             or "All Gemini models failed."
         )
 
+    # ═════════════════════════════════════
+    # TEXT GENERATION
+    # ═════════════════════════════════════
+
+    def generate_text(
+        self,
+        prompt: str,
+    ) -> str:
+
+        last_error = None
+
+        for model in self.MODELS:
+
+            payload = {
+                "model": model,
+                "input": [
+                    {
+                        "type": "user_input",
+                        "content": [
+                            {
+                                "type": "text",
+                                "text": prompt,
+                            }
+                        ],
+                    }
+                ],
+            }
+
+            try:
+
+                print(
+                    f"🧠 Gemini text model: {model}"
+                )
+
+                response = requests.post(
+                    self.INTERACTIONS_URL,
+                    headers={
+                        "x-goog-api-key": self.api_key,
+                        "Content-Type": "application/json",
+                    },
+                    json=payload,
+                    timeout=180,
+                )
+
+                print(
+                    f"📡 Gemini text status: "
+                    f"{response.status_code}"
+                )
+
+                if not response.ok:
+
+                    print(
+                        f"❌ Gemini text {model}: "
+                        f"{response.text}"
+                    )
+
+                    last_error = (
+                        f"{model}: "
+                        f"HTTP {response.status_code} "
+                        f"{response.text}"
+                    )
+
+                    continue
+
+                data = response.json()
+
+                answer = self._extract_output(
+                    data
+                )
+
+                if answer:
+
+                    print(
+                        f"✅ Gemini text succeeded: "
+                        f"{model}"
+                    )
+
+                    return answer
+
+                last_error = (
+                    f"{model}: empty response"
+                )
+
+            except requests.exceptions.Timeout:
+
+                last_error = (
+                    f"{model}: request timed out"
+                )
+
+            except requests.exceptions.RequestException as error:
+
+                last_error = (
+                    f"{model}: {error}"
+                )
+
+            except ValueError as error:
+
+                last_error = (
+                    f"{model}: invalid JSON"
+                )
+
+        raise RuntimeError(
+            last_error
+            or "All Gemini text models failed."
+        )
+
+    # ═════════════════════════════════════
+    # OUTPUT EXTRACTION
+    # ═════════════════════════════════════
+
     @staticmethod
     def _extract_output(data):
-        """
-        Extract model output from the Interactions API.
-        """
-
-        # The Interactions API normally exposes
-        # output_text directly.
 
         output_text = data.get(
             "output_text"
@@ -178,8 +276,6 @@ class GeminiProvider(AIProvider):
 
             if output_text:
                 return output_text
-
-        # Fallback: inspect interaction steps.
 
         steps = data.get(
             "steps",
@@ -206,9 +302,7 @@ class GeminiProvider(AIProvider):
                 if item.get("type") != "text":
                     continue
 
-                text = item.get(
-                    "text"
-                )
+                text = item.get("text")
 
                 if text:
                     text_parts.append(text)
