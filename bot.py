@@ -1,6 +1,5 @@
 import os
 import threading
-import base64
 
 import discord
 import requests
@@ -23,7 +22,11 @@ def home():
 
 def run_web():
     port = int(os.environ.get("PORT", 10000))
-    app.run(host="0.0.0.0", port=port)
+
+    app.run(
+        host="0.0.0.0",
+        port=port
+    )
 
 
 # ─────────────────────────────
@@ -41,14 +44,23 @@ bot = commands.Bot(
 
 @bot.event
 async def on_ready():
+
     print(f"✅ Logged in as {bot.user}")
     print(f"🆔 Bot ID: {bot.user.id}")
 
     try:
+
         synced = await bot.tree.sync()
-        print(f"✅ Synced {len(synced)} slash command(s)")
+
+        print(
+            f"✅ Synced {len(synced)} slash command(s)"
+        )
+
     except Exception as e:
-        print(f"❌ Slash command sync failed: {e}")
+
+        print(
+            f"❌ Slash command sync failed: {e}"
+        )
 
 
 # ─────────────────────────────
@@ -69,104 +81,149 @@ async def novel(
 
     await interaction.response.defer()
 
-    api_key = os.environ.get("OPENROUTER_API_KEY")
+    # ─────────────────────────
+    # API key
+    # ─────────────────────────
+
+    api_key = os.environ.get(
+        "OPENROUTER_API_KEY"
+    )
 
     if not api_key:
+
         await interaction.followup.send(
             "❌ OPENROUTER_API_KEY is missing from Render."
         )
+
         return
 
     # ─────────────────────────
-    # Check image type
+    # Check attachment
     # ─────────────────────────
 
-    allowed_types = {
-        "image/png",
-        "image/jpeg",
-        "image/jpg",
-        "image/webp",
-        "image/gif",
-    }
+    print(
+        f"🖼️ Received attachment: {board.filename}"
+    )
 
-    if board.content_type not in allowed_types:
+    print(
+        f"📦 Content type: {board.content_type}"
+    )
+
+    print(
+        f"📏 File size: {board.size} bytes"
+    )
+
+    # Discord normally supplies image/jpeg,
+    # image/png, image/webp, etc.
+    #
+    # We also check the filename because Discord
+    # can occasionally return a missing content type.
+
+    filename = board.filename.lower()
+
+    allowed_extensions = (
+        ".png",
+        ".jpg",
+        ".jpeg",
+        ".webp",
+        ".gif",
+    )
+
+    is_image = (
+        board.content_type
+        and board.content_type.startswith("image/")
+    ) or filename.endswith(allowed_extensions)
+
+    if not is_image:
+
         await interaction.followup.send(
-            "❌ Please upload a PNG, JPG, JPEG, WEBP, or GIF image."
+            "❌ Please upload an image "
+            "(PNG, JPG, JPEG, WEBP, or GIF)."
         )
+
         return
 
-    try:
+    # ─────────────────────────
+    # Vision prompt
+    # ─────────────────────────
 
-        print(f"🖼️ Received image: {board.filename}")
+    prompt = """
+You are Yeosang, an advanced visual-analysis system
+for an AI novel-writing application.
 
-        # ─────────────────────
-        # Download Discord image
-        # ─────────────────────
+You are looking at a collection board containing
+character cards.
 
-        image_response = requests.get(
-            board.url,
-            timeout=30
-        )
-
-        image_response.raise_for_status()
-
-        # ─────────────────────
-        # Convert image to Base64
-        # ─────────────────────
-
-        image_base64 = base64.b64encode(
-            image_response.content
-        ).decode("utf-8")
-
-        image_data_url = (
-            f"data:{board.content_type};base64,{image_base64}"
-        )
-
-        # ─────────────────────
-        # Vision instructions
-        # ─────────────────────
-
-        prompt = """
-You are Yeosang, an advanced visual analysis and novel-writing AI.
-
-You are looking at a collection board containing character cards.
-
-THIS IS ONLY A VISUAL ANALYSIS TEST.
+THIS IS A VISUAL ANALYSIS TEST.
 
 Do NOT write a novel yet.
 
-Carefully inspect the entire uploaded image.
+Study the uploaded image carefully.
 
-Identify and analyze:
+Your task is to extract useful information that a
+future novel-writing system can use.
 
-1. Every visible character.
-2. Each character's visible appearance.
-3. Hair, face, clothing, accessories, posture, expression,
-   body language, and distinctive visual details.
-4. The apparent mood or personality suggested by the visual design.
-5. Differences and contrasts between the characters.
-6. Possible relationships or character dynamics suggested by
-   the visual material.
-7. Important objects, symbols, locations, backgrounds, and motifs.
-8. The overall atmosphere and aesthetic of the collection.
+Analyze:
+
+1. EVERY visible character.
+
+2. Each character's visible appearance:
+   - face
+   - hair
+   - clothing
+   - accessories
+   - posture
+   - expression
+   - body language
+   - distinctive visual details
+
+3. Personality clues suggested by the visual design.
+
+4. Emotional clues.
+
+5. Differences and contrasts between characters.
+
+6. Possible relationship or character-dynamic clues
+   suggested by the visual material.
+
+7. Important objects.
+
+8. Symbols.
+
+9. Backgrounds and possible locations.
+
+10. Recurring visual motifs.
+
+11. The overall atmosphere and aesthetic.
 
 IMPORTANT RULES:
 
-- Only claim something is visually supported when the image actually
-  provides evidence.
-- Clearly distinguish observation from interpretation.
-- Do not invent character names.
-- Do not assume canon or fandom information.
+- Actually inspect the image.
+- Do not simply say that the image is safe.
+- Do not respond with a safety classification.
 - Do not write the novel.
-- Do not summarize the request.
-- Actually analyze the image.
+- Do not invent character names.
+- Do not assume fandom canon.
+- Do not claim uncertain details as facts.
+- Clearly distinguish observation from interpretation.
+- If something cannot be determined from the image,
+  say that it cannot be determined.
 
-Organize the response as:
+Use this structure:
 
-CHARACTERS
-- Character 1
-- Character 2
-- etc.
+CHARACTER 1
+Appearance:
+Personality clues:
+Emotional clues:
+Distinctive details:
+
+CHARACTER 2
+Appearance:
+Personality clues:
+Emotional clues:
+Distinctive details:
+
+Continue for every visible character.
 
 RELATIONSHIP / DYNAMIC CLUES
 
@@ -177,39 +234,78 @@ OVERALL ATMOSPHERE
 POSSIBLE STORY POTENTIAL
 """
 
-        # ─────────────────────
-        # OpenRouter request
-        # ─────────────────────
+    # ─────────────────────────
+    # OpenRouter request
+    # ─────────────────────────
+
+    try:
+
+        print(
+            "🧠 Sending image to OpenRouter..."
+        )
 
         response = requests.post(
+
             "https://openrouter.ai/api/v1/chat/completions",
+
             headers={
                 "Authorization": f"Bearer {api_key}",
                 "Content-Type": "application/json",
-                "HTTP-Referer": "https://yeosang-novel.onrender.com",
+                "HTTP-Referer": (
+                    "https://yeosang-novel.onrender.com"
+                ),
                 "X-Title": "Yeosang Novel",
             },
+
             json={
-                "model": "nvidia/nemotron-3-nano-omni:free",
+
+                "model": (
+                    "nvidia/"
+                    "nemotron-3-nano-omni:free"
+                ),
+
                 "messages": [
+
                     {
                         "role": "user",
+
                         "content": [
+
                             {
                                 "type": "text",
                                 "text": prompt,
                             },
+
                             {
                                 "type": "image_url",
+
                                 "image_url": {
-                                    "url": image_data_url
+                                    "url": board.url
                                 },
                             },
+
                         ],
                     }
+
                 ],
+
             },
+
             timeout=120,
+        )
+
+        # ─────────────────────
+        # Print complete response
+        # ─────────────────────
+
+        print(
+            f"OPENROUTER STATUS: "
+            f"{response.status_code}"
+        )
+
+        print(
+            f"OPENROUTER RESPONSE: "
+            f"{response.text}"
         )
 
         # ─────────────────────
@@ -218,32 +314,81 @@ POSSIBLE STORY POTENTIAL
 
         if not response.ok:
 
-            print(
-                f"OPENROUTER STATUS: {response.status_code}"
-            )
+            error_text = response.text
 
-            print(
-                f"OPENROUTER RESPONSE: {response.text}"
-            )
+            # Keep Discord message under its limit.
+            if len(error_text) > 1500:
+                error_text = error_text[:1500]
 
             await interaction.followup.send(
-                f"❌ OpenRouter error: `{response.status_code}`"
+                "❌ **OpenRouter rejected the vision request.**\n\n"
+                f"Status: `{response.status_code}`\n"
+                f"```json\n{error_text}\n```"
             )
 
             return
 
         # ─────────────────────
-        # Read AI response
+        # Parse response
         # ─────────────────────
 
-        data = response.json()
+        try:
 
-        answer = data["choices"][0]["message"]["content"]
+            data = response.json()
 
-        print("✅ Vision analysis successful.")
+        except ValueError:
+
+            await interaction.followup.send(
+                "❌ OpenRouter returned an invalid response."
+            )
+
+            return
 
         # ─────────────────────
-        # Send result to Discord
+        # Extract answer safely
+        # ─────────────────────
+
+        choices = data.get("choices")
+
+        if not choices:
+
+            print(
+                "❌ No choices returned by OpenRouter."
+            )
+
+            await interaction.followup.send(
+                "❌ OpenRouter returned no AI response."
+            )
+
+            return
+
+        message = choices[0].get(
+            "message",
+            {}
+        )
+
+        answer = message.get(
+            "content"
+        )
+
+        if not answer:
+
+            print(
+                f"❌ Unexpected AI response: {data}"
+            )
+
+            await interaction.followup.send(
+                "❌ The AI returned an empty response."
+            )
+
+            return
+
+        print(
+            "✅ Vision analysis successful."
+        )
+
+        # ─────────────────────
+        # Send analysis
         # ─────────────────────
 
         max_length = 1900
@@ -251,7 +396,8 @@ POSSIBLE STORY POTENTIAL
         if len(answer) <= max_length:
 
             await interaction.followup.send(
-                f"👁️ **Yeosang's Visual Analysis**\n\n{answer}"
+                "👁️ **Yeosang's Visual Analysis**\n\n"
+                f"{answer}"
             )
 
         else:
@@ -266,11 +412,15 @@ POSSIBLE STORY POTENTIAL
             ]
 
             await interaction.followup.send(
-                f"👁️ **Yeosang's Visual Analysis**\n\n{chunks[0]}"
+                "👁️ **Yeosang's Visual Analysis**\n\n"
+                f"{chunks[0]}"
             )
 
             for chunk in chunks[1:]:
-                await interaction.followup.send(chunk)
+
+                await interaction.followup.send(
+                    chunk
+                )
 
     # ─────────────────────────
     # Timeout
@@ -287,7 +437,21 @@ POSSIBLE STORY POTENTIAL
         )
 
     # ─────────────────────────
-    # General error
+    # Connection error
+    # ─────────────────────────
+
+    except requests.exceptions.RequestException as e:
+
+        print(
+            f"❌ REQUEST ERROR: {type(e).__name__}: {e}"
+        )
+
+        await interaction.followup.send(
+            "❌ Could not connect to OpenRouter."
+        )
+
+    # ─────────────────────────
+    # Unexpected error
     # ─────────────────────────
 
     except Exception as e:
@@ -297,7 +461,8 @@ POSSIBLE STORY POTENTIAL
         )
 
         await interaction.followup.send(
-            "❌ Something went wrong while analyzing the collection."
+            "❌ Something went wrong while analyzing "
+            "the collection."
         )
 
 
@@ -312,9 +477,12 @@ if __name__ == "__main__":
         daemon=True
     ).start()
 
-    token = os.environ.get("DISCORD_TOKEN")
+    token = os.environ.get(
+        "DISCORD_TOKEN"
+    )
 
     if not token:
+
         raise RuntimeError(
             "DISCORD_TOKEN is not set."
         )
