@@ -3,6 +3,7 @@ import threading
 
 import discord
 import requests
+from discord import app_commands
 from discord.ext import commands
 from flask import Flask
 
@@ -50,14 +51,20 @@ async def on_ready():
 
 
 # ─────────────────────────────
-# AI TEST
+# /novel
 # ─────────────────────────────
 
 @bot.tree.command(
     name="novel",
-    description="Test Yeosang's novel intelligence."
+    description="Analyze a collection board for a novel."
 )
-async def novel(interaction: discord.Interaction):
+@app_commands.describe(
+    board="Upload the collection board you want Yeosang to analyze."
+)
+async def novel(
+    interaction: discord.Interaction,
+    board: discord.Attachment
+):
 
     await interaction.response.defer()
 
@@ -69,7 +76,96 @@ async def novel(interaction: discord.Interaction):
         )
         return
 
+    # ─────────────────────────
+    # Check file type
+    # ─────────────────────────
+
+    allowed_types = (
+        "image/png",
+        "image/jpeg",
+        "image/jpg",
+        "image/webp",
+        "image/gif",
+    )
+
+    if board.content_type not in allowed_types:
+
+        await interaction.followup.send(
+            "❌ Please upload an image file "
+            "(PNG, JPG, JPEG, WEBP, or GIF)."
+        )
+
+        return
+
     try:
+
+        print(
+            f"🖼️ Received image: {board.filename}"
+        )
+
+        # ─────────────────────
+        # Download Discord image
+        # ─────────────────────
+
+        image_response = requests.get(
+            board.url,
+            timeout=30
+        )
+
+        image_response.raise_for_status()
+
+        # ─────────────────────
+        # Convert image to base64
+        # ─────────────────────
+
+        import base64
+
+        image_base64 = base64.b64encode(
+            image_response.content
+        ).decode("utf-8")
+
+        mime_type = board.content_type
+
+        image_data_url = (
+            f"data:{mime_type};base64,{image_base64}"
+        )
+
+        # ─────────────────────
+        # Vision prompt
+        # ─────────────────────
+
+        prompt = """
+You are Yeosang, an advanced AI novel-writing system.
+
+Analyze the uploaded collection board carefully.
+
+This is NOT yet a request to write the novel.
+
+Your job is to study the visual material and identify:
+
+1. Every visible character.
+2. Their apparent visual traits.
+3. Clothing and styling.
+4. Distinctive accessories or objects.
+5. Apparent personality clues suggested by their appearance.
+6. The relationships or contrasts that could exist between the characters.
+7. The overall atmosphere and aesthetic of the collection.
+8. Any symbols, locations, objects, or visual details that could become
+   important story elements.
+
+Do not invent names if they are not visible or provided.
+
+Separate what you can directly observe from what you are interpreting.
+
+Write a detailed but organized visual analysis.
+
+Do NOT write the novel yet.
+"""
+
+        # ─────────────────────
+        # OpenRouter request
+        # ─────────────────────
+
         response = requests.post(
             "https://openrouter.ai/api/v1/chat/completions",
             headers={
@@ -83,20 +179,27 @@ async def novel(interaction: discord.Interaction):
                 "messages": [
                     {
                         "role": "user",
-                        "content": (
-                            "You are Yeosang, a creative novel-writing AI. "
-                            "Reply with exactly one short, imaginative sentence "
-                            "to confirm that your story brain is working."
-                        ),
+                        "content": [
+                            {
+                                "type": "text",
+                                "text": prompt,
+                            },
+                            {
+                                "type": "image_url",
+                                "image_url": {
+                                    "url": image_data_url
+                                },
+                            },
+                        ],
                     }
                 ],
             },
-            timeout=60,
+            timeout=120,
         )
 
-        # ─────────────────────────
+        # ─────────────────────
         # OpenRouter error
-        # ─────────────────────────
+        # ─────────────────────
 
         if not response.ok:
 
@@ -114,19 +217,45 @@ async def novel(interaction: discord.Interaction):
 
             return
 
-        # ─────────────────────────
-        # Read AI response
-        # ─────────────────────────
+        # ─────────────────────
+        # Read response
+        # ─────────────────────
 
         data = response.json()
 
         answer = data["choices"][0]["message"]["content"]
 
-        print("✅ OpenRouter request successful.")
-
-        await interaction.followup.send(
-            f"📖 **Yeosang's story brain:**\n\n{answer}"
+        print(
+            "✅ Vision analysis successful."
         )
+
+        # ─────────────────────
+        # Discord message limit
+        # ─────────────────────
+
+        if len(answer) <= 1900:
+
+            await interaction.followup.send(
+                f"👁️ **Yeosang's Visual Analysis**\n\n{answer}"
+            )
+
+        else:
+
+            # Split long AI response into Discord-safe chunks.
+            chunks = [
+                answer[i:i + 1900]
+                for i in range(0, len(answer), 1900)
+            ]
+
+            await interaction.followup.send(
+                f"👁️ **Yeosang's Visual Analysis**\n\n{chunks[0]}"
+            )
+
+            for chunk in chunks[1:]:
+
+                await interaction.followup.send(
+                    chunk
+                )
 
     # ─────────────────────────
     # Timeout
@@ -139,11 +268,11 @@ async def novel(interaction: discord.Interaction):
         )
 
         await interaction.followup.send(
-            "❌ OpenRouter took too long to respond."
+            "❌ Yeosang took too long to analyze the image."
         )
 
     # ─────────────────────────
-    # Unexpected error
+    # General error
     # ─────────────────────────
 
     except Exception as e:
@@ -153,7 +282,7 @@ async def novel(interaction: discord.Interaction):
         )
 
         await interaction.followup.send(
-            "❌ Something went wrong while contacting the AI."
+            "❌ Something went wrong while analyzing the collection."
         )
 
 
