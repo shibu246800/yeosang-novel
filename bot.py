@@ -77,7 +77,7 @@ async def novel(interaction: discord.Interaction):
                 "Content-Type": "application/json",
             },
             json={
-                "model": "google/gemini-3-flash-preview",
+                "model": "google/gemini-2.0-flash-exp:free",
                 "messages": [
                     {
                         "role": "user",
@@ -92,7 +92,6 @@ async def novel(interaction: discord.Interaction):
             timeout=60,
         )
 
-        # Show the actual OpenRouter error
         if not response.ok:
             print(
                 f"OPENROUTER STATUS: {response.status_code}"
@@ -124,7 +123,9 @@ async def novel(interaction: discord.Interaction):
         )
 
     except Exception as e:
-        print(f"❌ AI ERROR: {type(e).__name__}: {e}")
+        print(
+            f"❌ AI ERROR: {type(e).__name__}: {e}"
+        )
 
         await interaction.followup.send(
             "❌ Something went wrong while contacting the AI."
