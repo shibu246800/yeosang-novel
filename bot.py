@@ -7,10 +7,12 @@ from discord import app_commands
 from discord.ext import commands
 from flask import Flask
 
+from ai.gemini import GeminiProvider
 
-# ─────────────────────────────
-# Web server for Render
-# ─────────────────────────────
+
+# ═════════════════════════════════════
+# WEB SERVER FOR RENDER
+# ═════════════════════════════════════
 
 app = Flask(__name__)
 
@@ -29,9 +31,9 @@ def run_web():
     )
 
 
-# ─────────────────────────────
-# Discord bot
-# ─────────────────────────────
+# ═════════════════════════════════════
+# DISCORD BOT
+# ═════════════════════════════════════
 
 intents = discord.Intents.default()
 intents.message_content = True
@@ -42,349 +44,96 @@ bot = commands.Bot(
 )
 
 
-# ─────────────────────────────
-# OpenRouter helpers
-# ─────────────────────────────
+# ═════════════════════════════════════
+# AI PROVIDER
+# ═════════════════════════════════════
 
-OPENROUTER_MODELS_URL = (
-    "https://openrouter.ai/api/v1/models"
-)
-
-OPENROUTER_CHAT_URL = (
-    "https://openrouter.ai/api/v1/chat/completions"
-)
-
-
-def get_free_vision_models(api_key):
+def get_ai_provider():
     """
-    Ask OpenRouter for its current model list.
+    Create the currently available AI provider.
 
-    Return free models that advertise image input.
+    Gemini is the first provider.
+    More providers will be added later without
+    changing the Discord commands.
     """
-
-    response = requests.get(
-        OPENROUTER_MODELS_URL,
-        headers={
-            "Authorization": f"Bearer {api_key}",
-        },
-        timeout=30,
-    )
-
-    response.raise_for_status()
-
-    data = response.json()
-
-    models = data.get("data", [])
-
-    vision_models = []
-
-    for model in models:
-
-        model_id = model.get("id")
-
-        if not model_id:
-            continue
-
-        architecture = model.get(
-            "architecture",
-            {}
-        )
-
-        input_modalities = architecture.get(
-            "input_modalities",
-            []
-        )
-
-        pricing = model.get(
-            "pricing",
-            {}
-        )
-
-        prompt_price = pricing.get(
-            "prompt"
-        )
-
-        completion_price = pricing.get(
-            "completion"
-        )
-
-        # We want models that:
-        #
-        # 1. Accept images.
-        # 2. Have zero input price.
-        # 3. Have zero output price.
-
-        supports_image = (
-            "image" in input_modalities
-        )
-
-        is_free = (
-            str(prompt_price) == "0"
-            and str(completion_price) == "0"
-        )
-
-        if supports_image and is_free:
-
-            vision_models.append(
-                {
-                    "id": model_id,
-                    "name": model.get(
-                        "name",
-                        model_id
-                    ),
-                    "context_length": model.get(
-                        "context_length"
-                    ),
-                }
-            )
-
-    return vision_models
-
-
-def extract_text_from_chat_response(data):
-    """
-    Safely extract normal chat-completion text.
-    """
-
-    choices = data.get(
-        "choices",
-        []
-    )
-
-    if not choices:
-        return None
-
-    message = choices[0].get(
-        "message",
-        {}
-    )
-
-    content = message.get(
-        "content"
-    )
-
-    if isinstance(content, str):
-        return content
-
-    # Some providers can return content
-    # as structured pieces.
-
-    if isinstance(content, list):
-
-        text_parts = []
-
-        for part in content:
-
-            if not isinstance(part, dict):
-                continue
-
-            text = part.get(
-                "text"
-            )
-
-            if text:
-                text_parts.append(text)
-
-        if text_parts:
-            return "\n".join(text_parts)
-
-    return None
-
-
-def looks_like_safety_only_response(text):
-    """
-    Detect the exact kind of response we were
-    getting from the previous free router.
-    """
-
-    if not text:
-        return True
-
-    cleaned = text.strip().lower()
-
-    safety_responses = {
-        "user safety: safe",
-        "user safety:safe",
-        "safe",
-    }
-
-    if cleaned in safety_responses:
-        return True
-
-    return False
-
-
-# ─────────────────────────────
-# Bot ready
-# ─────────────────────────────
-
-@bot.event
-async def on_ready():
-
-    print(
-        f"✅ Logged in as {bot.user}"
-    )
-
-    print(
-        f"🆔 Bot ID: {bot.user.id}"
-    )
-
-    try:
-
-        synced = await bot.tree.sync()
-
-        print(
-            f"✅ Synced {len(synced)} slash command(s)"
-        )
-
-    except Exception as e:
-
-        print(
-            f"❌ Slash command sync failed: {e}"
-        )
-
-
-# ─────────────────────────────
-# /novel
-# ─────────────────────────────
-
-@bot.tree.command(
-    name="novel",
-    description="Analyze a collection board for a novel."
-)
-@app_commands.describe(
-    board="Upload the collection board you want Yeosang to analyze."
-)
-async def novel(
-    interaction: discord.Interaction,
-    board: discord.Attachment
-):
-
-    await interaction.response.defer()
-
-    # ─────────────────────────
-    # API key
-    # ─────────────────────────
 
     api_key = os.environ.get(
-        "OPENROUTER_API_KEY"
+        "GEMINI_API_KEY"
     )
 
     if not api_key:
+        return None
 
-        await interaction.followup.send(
-            "❌ OPENROUTER_API_KEY is missing from Render."
-        )
-
-        return
-
-    # ─────────────────────────
-    # Check attachment
-    # ─────────────────────────
-
-    filename = board.filename.lower()
-
-    allowed_extensions = (
-        ".png",
-        ".jpg",
-        ".jpeg",
-        ".webp",
-        ".gif",
+    return GeminiProvider(
+        api_key=api_key
     )
 
-    is_image = (
-        (
-            board.content_type
-            and board.content_type.startswith("image/")
-        )
-        or filename.endswith(
-            allowed_extensions
-        )
-    )
 
-    if not is_image:
+# ═════════════════════════════════════
+# IMAGE PROMPT
+# ═════════════════════════════════════
 
-        await interaction.followup.send(
-            "❌ Please upload a PNG, JPG, JPEG, WEBP, or GIF image."
-        )
+VISUAL_ANALYSIS_PROMPT = """
+You are Yeosang, the visual-analysis brain of
+an advanced AI novel-writing system.
 
-        return
-
-    print(
-        f"🖼️ Received image: {board.filename}"
-    )
-
-    print(
-        f"📦 Content type: {board.content_type}"
-    )
-
-    print(
-        f"📏 Size: {board.size} bytes"
-    )
-
-    # ─────────────────────────
-    # Vision prompt
-    # ─────────────────────────
-
-    prompt = """
-You are Yeosang, the visual-analysis brain of an
-advanced AI novel-writing system.
-
-You have been given a collection board containing
-character cards.
+This is a collection board containing character cards.
 
 THIS IS A VISUAL ANALYSIS TEST.
 
+Actually inspect the uploaded image carefully.
+
 Do NOT write a novel yet.
 
-Actually inspect the uploaded image.
+Do NOT give a safety classification.
 
-Study every visible character and every useful visual
-detail.
+Do NOT simply answer "safe".
+
+Analyze the visible characters and the visual storytelling
+potential of the board.
+
+For EVERY visible character, identify only what can reasonably
+be observed from the image.
 
 Analyze:
 
-1. EVERY visible character.
-
-2. Appearance:
-   - face
+1. Character appearance
    - hair
    - clothing
    - accessories
-   - posture
    - expression
+   - posture
    - body language
-   - distinctive features
+   - distinctive visual details
 
-3. Personality clues suggested by appearance.
+2. Personality clues suggested by their presentation.
 
-4. Emotional clues.
+3. Emotional clues.
 
-5. Differences and contrasts between characters.
+4. Contrasts between characters.
 
-6. Possible relationship or dynamic clues.
+5. Possible relationship or dynamic clues.
 
-7. Important objects.
+6. Important objects.
 
-8. Symbols and motifs.
+7. Symbols and motifs.
 
-9. Backgrounds and possible locations.
+8. Background and setting clues.
 
-10. Overall aesthetic and atmosphere.
+9. Overall atmosphere.
 
-11. Possible story potential.
+10. Story potential.
 
-IMPORTANT:
+IMPORTANT RULES:
 
 - Actually inspect the image.
-- Do not give a safety classification.
-- Do not simply answer "safe".
 - Do not invent character names.
 - Do not assume fandom canon.
-- Do not invent facts that cannot be seen.
-- Separate observation from interpretation.
-- If something is unclear, say so.
-- Do not write the novel yet.
+- Do not identify real people.
+- Do not claim unseen facts.
+- Separate visible observations from interpretation.
+- If something cannot be determined, say so.
+- Do not write the actual novel yet.
 
 Use this structure:
 
@@ -411,308 +160,241 @@ OVERALL ATMOSPHERE
 POSSIBLE STORY POTENTIAL
 """
 
-    # ─────────────────────────
-    # Find current free vision
-    # models
-    # ─────────────────────────
+
+# ═════════════════════════════════════
+# BOT READY
+# ═════════════════════════════════════
+
+@bot.event
+async def on_ready():
+
+    print(
+        f"✅ Logged in as {bot.user}"
+    )
+
+    print(
+        f"🆔 Bot ID: {bot.user.id}"
+    )
 
     try:
 
-        print(
-            "🔎 Asking OpenRouter for current "
-            "free vision models..."
-        )
-
-        vision_models = get_free_vision_models(
-            api_key
-        )
-
-        if not vision_models:
-
-            await interaction.followup.send(
-                "❌ OpenRouter currently reports "
-                "no free vision models available."
-            )
-
-            return
+        synced = await bot.tree.sync()
 
         print(
-            f"👁️ Found {len(vision_models)} "
-            "free vision model(s)."
+            f"✅ Synced {len(synced)} "
+            f"slash command(s)"
         )
 
-        for model in vision_models:
-
-            print(
-                f"   • {model['id']}"
-            )
-
-    except requests.exceptions.RequestException as e:
+    except Exception as error:
 
         print(
-            f"❌ MODEL LIST ERROR: {e}"
+            f"❌ Slash command sync failed: "
+            f"{error}"
         )
+
+
+# ═════════════════════════════════════
+# /novel
+# ═════════════════════════════════════
+
+@bot.tree.command(
+    name="novel",
+    description="Analyze a collection board for a novel."
+)
+@app_commands.describe(
+    board="Upload the collection board you want Yeosang to analyze."
+)
+async def novel(
+    interaction: discord.Interaction,
+    board: discord.Attachment
+):
+
+    await interaction.response.defer()
+
+    # ─────────────────────────────────
+    # GET PROVIDER
+    # ─────────────────────────────────
+
+    provider = get_ai_provider()
+
+    if provider is None:
 
         await interaction.followup.send(
-            "❌ I couldn't retrieve the current "
-            "OpenRouter model list."
+            "❌ No AI provider is configured.\n\n"
+            "Add `GEMINI_API_KEY` to Render "
+            "environment variables."
         )
 
         return
 
-    # ─────────────────────────
-    # Try the current models
-    # ─────────────────────────
+    # ─────────────────────────────────
+    # CHECK IMAGE
+    # ─────────────────────────────────
 
-    successful_answer = None
-    successful_model = None
+    filename = board.filename.lower()
 
-    failed_models = []
+    allowed_extensions = (
+        ".png",
+        ".jpg",
+        ".jpeg",
+        ".webp",
+        ".gif",
+    )
 
-    for model in vision_models:
+    is_image = (
+        (
+            board.content_type
+            and board.content_type.startswith(
+                "image/"
+            )
+        )
+        or filename.endswith(
+            allowed_extensions
+        )
+    )
 
-        model_id = model["id"]
+    if not is_image:
 
-        print(
-            f"🧪 Testing vision model: {model_id}"
+        await interaction.followup.send(
+            "❌ Please upload a PNG, JPG, "
+            "JPEG, WEBP, or GIF image."
         )
 
-        payload = {
+        return
 
-            "model": model_id,
+    print(
+        f"🖼️ Received board: "
+        f"{board.filename}"
+    )
 
-            "messages": [
+    print(
+        f"📏 Size: "
+        f"{board.size} bytes"
+    )
 
-                {
-                    "role": "user",
+    # ─────────────────────────────────
+    # DOWNLOAD IMAGE
+    # ─────────────────────────────────
 
-                    "content": [
+    try:
 
-                        {
-                            "type": "text",
-                            "text": prompt,
-                        },
+        image_response = requests.get(
+            board.url,
+            timeout=30
+        )
 
-                        {
-                            "type": "image_url",
+        image_response.raise_for_status()
 
-                            "image_url": {
-                                "url": board.url
-                            },
-                        },
+        image_bytes = image_response.content
 
-                    ],
-                }
+    except requests.RequestException as error:
 
-            ],
+        print(
+            f"❌ Image download failed: "
+            f"{error}"
+        )
+
+        await interaction.followup.send(
+            "❌ I couldn't retrieve the "
+            "uploaded image from Discord."
+        )
+
+        return
+
+    # ─────────────────────────────────
+    # MIME TYPE
+    # ─────────────────────────────────
+
+    mime_type = board.content_type
+
+    if not mime_type:
+
+        extension = filename.rsplit(
+            ".",
+            1
+        )[-1]
+
+        mime_map = {
+            "jpg": "image/jpeg",
+            "jpeg": "image/jpeg",
+            "png": "image/png",
+            "webp": "image/webp",
+            "gif": "image/gif",
         }
 
-        try:
+        mime_type = mime_map.get(
+            extension,
+            "image/jpeg"
+        )
 
-            response = requests.post(
+    # ─────────────────────────────────
+    # AI ANALYSIS
+    # ─────────────────────────────────
 
-                OPENROUTER_CHAT_URL,
+    try:
 
-                headers={
-                    "Authorization": (
-                        f"Bearer {api_key}"
-                    ),
-                    "Content-Type": (
-                        "application/json"
-                    ),
-                    "HTTP-Referer": (
-                        "https://yeosang-novel.onrender.com"
-                    ),
-                    "X-Title": (
-                        "Yeosang Novel"
-                    ),
-                },
+        analysis = provider.analyze_image(
+            image_bytes=image_bytes,
+            mime_type=mime_type,
+            prompt=VISUAL_ANALYSIS_PROMPT,
+        )
 
-                json=payload,
-
-                timeout=120,
-            )
-
-            print(
-                f"MODEL: {model_id}"
-            )
-
-            print(
-                f"STATUS: {response.status_code}"
-            )
-
-            # ─────────────────────
-            # Model failed
-            # ─────────────────────
-
-            if not response.ok:
-
-                print(
-                    f"RESPONSE: {response.text}"
-                )
-
-                failed_models.append(
-                    model_id
-                )
-
-                continue
-
-            # ─────────────────────
-            # Extract answer
-            # ─────────────────────
-
-            try:
-
-                data = response.json()
-
-            except ValueError:
-
-                failed_models.append(
-                    model_id
-                )
-
-                continue
-
-            answer = (
-                extract_text_from_chat_response(
-                    data
-                )
-            )
-
-            # ─────────────────────
-            # Reject safety-only
-            # ─────────────────────
-
-            if looks_like_safety_only_response(
-                answer
-            ):
-
-                print(
-                    f"⚠️ {model_id} returned "
-                    "a safety-only response."
-                )
-
-                failed_models.append(
-                    model_id
-                )
-
-                continue
-
-            # ─────────────────────
-            # Success
-            # ─────────────────────
-
-            if answer:
-
-                successful_answer = answer
-                successful_model = model_id
-
-                print(
-                    f"✅ Vision model succeeded: "
-                    f"{model_id}"
-                )
-
-                break
-
-            failed_models.append(
-                model_id
-            )
-
-        except requests.exceptions.Timeout:
-
-            print(
-                f"⏱️ {model_id} timed out."
-            )
-
-            failed_models.append(
-                model_id
-            )
-
-        except requests.exceptions.RequestException as e:
-
-            print(
-                f"❌ {model_id} request error: {e}"
-            )
-
-            failed_models.append(
-                model_id
-            )
-
-    # ─────────────────────────
-    # No model succeeded
-    # ─────────────────────────
-
-    if not successful_answer:
+    except Exception as error:
 
         print(
-            "❌ No free vision model successfully "
-            "analyzed the image."
+            f"❌ AI provider failed: "
+            f"{error}"
         )
 
         await interaction.followup.send(
-            "❌ **No current free vision model "
-            "successfully analyzed the board.**\n\n"
-            "I checked OpenRouter's live model list "
-            "instead of using a hard-coded model ID."
+            "❌ Yeosang couldn't analyze "
+            "this collection board.\n\n"
+            f"`{error}`"
         )
 
         return
 
-    # ─────────────────────────
-    # Successful analysis
-    # ─────────────────────────
-
-    max_length = 1900
+    # ─────────────────────────────────
+    # RESULT
+    # ─────────────────────────────────
 
     header = (
         "👁️ **Yeosang's Visual Analysis**\n"
-        f"*Vision model: `{successful_model}`*\n\n"
+        "*Provider: Gemini*\n\n"
     )
 
-    if len(successful_answer) <= (
-        max_length - len(header)
-    ):
+    first_limit = 1900 - len(header)
+
+    if len(analysis) <= first_limit:
 
         await interaction.followup.send(
-            header + successful_answer
+            header + analysis
         )
 
-    else:
+        return
 
-        first_chunk_length = (
-            max_length - len(header)
-        )
+    # First Discord message
+    await interaction.followup.send(
+        header + analysis[:first_limit]
+    )
 
-        first_chunk = successful_answer[
-            :first_chunk_length
-        ]
+    # Remaining Discord messages
+    remaining = analysis[first_limit:]
 
-        remaining = successful_answer[
-            first_chunk_length:
-        ]
+    while remaining:
+
+        chunk = remaining[:1900]
+
+        remaining = remaining[1900:]
 
         await interaction.followup.send(
-            header + first_chunk
+            chunk
         )
 
-        while remaining:
 
-            chunk = remaining[
-                :1900
-            ]
-
-            remaining = remaining[
-                1900:
-            ]
-
-            await interaction.followup.send(
-                chunk
-            )
-
-
-# ─────────────────────────────
-# Start
-# ─────────────────────────────
+# ═════════════════════════════════════
+# START
+# ═════════════════════════════════════
 
 if __name__ == "__main__":
 
