@@ -7,7 +7,7 @@ from discord import app_commands
 from discord.ext import commands
 from flask import Flask
 
-from ai.gemini import GeminiProvider
+from ai.manager import AIManager
 
 
 # ═════════════════════════════════════
@@ -23,7 +23,13 @@ def home():
 
 
 def run_web():
-    port = int(os.environ.get("PORT", 10000))
+
+    port = int(
+        os.environ.get(
+            "PORT",
+            10000
+        )
+    )
 
     app.run(
         host="0.0.0.0",
@@ -36,6 +42,7 @@ def run_web():
 # ═════════════════════════════════════
 
 intents = discord.Intents.default()
+
 intents.message_content = True
 
 bot = commands.Bot(
@@ -45,28 +52,10 @@ bot = commands.Bot(
 
 
 # ═════════════════════════════════════
-# AI PROVIDER
+# AI MANAGER
 # ═════════════════════════════════════
 
-def get_ai_provider():
-    """
-    Create the currently available AI provider.
-
-    Gemini is the first provider.
-    More providers will be added later without
-    changing the Discord commands.
-    """
-
-    api_key = os.environ.get(
-        "GEMINI_API_KEY"
-    )
-
-    if not api_key:
-        return None
-
-    return GeminiProvider(
-        api_key=api_key
-    )
+ai_manager = AIManager()
 
 
 # ═════════════════════════════════════
@@ -212,22 +201,6 @@ async def novel(
     await interaction.response.defer()
 
     # ─────────────────────────────────
-    # GET PROVIDER
-    # ─────────────────────────────────
-
-    provider = get_ai_provider()
-
-    if provider is None:
-
-        await interaction.followup.send(
-            "❌ No AI provider is configured.\n\n"
-            "Add `GEMINI_API_KEY` to Render "
-            "environment variables."
-        )
-
-        return
-
-    # ─────────────────────────────────
     # CHECK IMAGE
     # ─────────────────────────────────
 
@@ -333,16 +306,18 @@ async def novel(
 
     try:
 
-        analysis = provider.analyze_image(
-            image_bytes=image_bytes,
-            mime_type=mime_type,
-            prompt=VISUAL_ANALYSIS_PROMPT,
+        analysis, provider_name = (
+            ai_manager.analyze_image(
+                image_bytes=image_bytes,
+                mime_type=mime_type,
+                prompt=VISUAL_ANALYSIS_PROMPT,
+            )
         )
 
     except Exception as error:
 
         print(
-            f"❌ AI provider failed: "
+            f"❌ All AI providers failed: "
             f"{error}"
         )
 
@@ -360,7 +335,7 @@ async def novel(
 
     header = (
         "👁️ **Yeosang's Visual Analysis**\n"
-        "*Provider: Gemini*\n\n"
+        f"*Provider: {provider_name}*\n\n"
     )
 
     first_limit = 1900 - len(header)
@@ -373,12 +348,10 @@ async def novel(
 
         return
 
-    # First Discord message
     await interaction.followup.send(
         header + analysis[:first_limit]
     )
 
-    # Remaining Discord messages
     remaining = analysis[first_limit:]
 
     while remaining:
