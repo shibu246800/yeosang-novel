@@ -7,6 +7,10 @@ from discord.ext import commands
 from flask import Flask
 
 
+# ─────────────────────────────
+# Web server for Render
+# ─────────────────────────────
+
 app = Flask(__name__)
 
 
@@ -20,6 +24,10 @@ def run_web():
     app.run(host="0.0.0.0", port=port)
 
 
+# ─────────────────────────────
+# Discord bot
+# ─────────────────────────────
+
 intents = discord.Intents.default()
 intents.message_content = True
 
@@ -32,13 +40,18 @@ bot = commands.Bot(
 @bot.event
 async def on_ready():
     print(f"✅ Logged in as {bot.user}")
+    print(f"🆔 Bot ID: {bot.user.id}")
 
     try:
         synced = await bot.tree.sync()
         print(f"✅ Synced {len(synced)} slash command(s)")
     except Exception as e:
-        print(f"❌ Slash sync failed: {e}")
+        print(f"❌ Slash command sync failed: {e}")
 
+
+# ─────────────────────────────
+# AI TEST
+# ─────────────────────────────
 
 @bot.tree.command(
     name="novel",
@@ -52,7 +65,7 @@ async def novel(interaction: discord.Interaction):
 
     if not api_key:
         await interaction.followup.send(
-            "❌ OPENROUTER_API_KEY is missing."
+            "❌ OPENROUTER_API_KEY is missing from Render."
         )
         return
 
@@ -79,28 +92,51 @@ async def novel(interaction: discord.Interaction):
             timeout=60,
         )
 
+        # Show the actual OpenRouter error
         if not response.ok:
-            print(response.text)
+            print(
+                f"OPENROUTER STATUS: {response.status_code}"
+            )
+            print(
+                f"OPENROUTER RESPONSE: {response.text}"
+            )
+
             await interaction.followup.send(
-                "❌ AI request failed. Check the Render logs."
+                f"❌ OpenRouter error: `{response.status_code}`"
             )
             return
 
         data = response.json()
+
         answer = data["choices"][0]["message"]["content"]
+
+        print("✅ OpenRouter request successful.")
 
         await interaction.followup.send(
             f"📖 **Yeosang's story brain:**\n\n{answer}"
         )
 
+    except requests.exceptions.Timeout:
+        print("❌ OpenRouter request timed out.")
+
+        await interaction.followup.send(
+            "❌ OpenRouter took too long to respond."
+        )
+
     except Exception as e:
-        print(f"❌ AI error: {e}")
+        print(f"❌ AI ERROR: {type(e).__name__}: {e}")
+
         await interaction.followup.send(
             "❌ Something went wrong while contacting the AI."
         )
 
 
+# ─────────────────────────────
+# Start
+# ─────────────────────────────
+
 if __name__ == "__main__":
+
     threading.Thread(
         target=run_web,
         daemon=True
@@ -109,6 +145,8 @@ if __name__ == "__main__":
     token = os.environ.get("DISCORD_TOKEN")
 
     if not token:
-        raise RuntimeError("DISCORD_TOKEN is not set.")
+        raise RuntimeError(
+            "DISCORD_TOKEN is not set."
+        )
 
     bot.run(token)
