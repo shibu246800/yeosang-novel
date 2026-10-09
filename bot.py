@@ -28,6 +28,8 @@ BOARD_FOLDER = Path("data/boards")
 DATABASE_PATH.parent.mkdir(parents=True, exist_ok=True)
 BOARD_FOLDER.mkdir(parents=True, exist_ok=True)
 
+MAX_IMAGE_SIZE = 15 * 1024 * 1024
+
 app = Flask(__name__)
 
 
@@ -46,9 +48,9 @@ def run_web():
 # ==========================================
 
 def connect_db():
-    connection = sqlite3.connect(DATABASE_PATH)
-    connection.row_factory = sqlite3.Row
-    return connection
+    db = sqlite3.connect(DATABASE_PATH)
+    db.row_factory = sqlite3.Row
+    return db
 
 
 def initialize_database():
@@ -84,13 +86,34 @@ def initialize_database():
             )
         """)
 
+        # Safely add new fields to existing databases.
+        columns = {
+            row["name"]
+            for row in db.execute(
+                "PRAGMA table_info(story_sessions)"
+            ).fetchall()
+        }
+
+        migrations = {
+            "story_plan": "TEXT",
+            "title_options": "TEXT",
+            "chosen_title": "TEXT",
+            "plan_status": "TEXT NOT NULL DEFAULT 'developing'",
+        }
+
+        for column, definition in migrations.items():
+            if column not in columns:
+                db.execute(
+                    f"ALTER TABLE story_sessions "
+                    f"ADD COLUMN {column} {definition}"
+                )
+
 
 initialize_database()
 
 
 def today_string():
-    # Use UTC so the date is consistent across server restarts.
-    # We can change this to a configured timezone later.
+    # Session dates use UTC for consistent server behavior.
     return datetime.utcnow().date().isoformat()
 
 
@@ -127,11 +150,7 @@ def save_session(
             "visual_analysis": visual_analysis,
         },
         "user_choices": [],
-        "characters": [],
-        "setting": None,
-        "relationship": None,
-        "conflict": None,
-        "ending_tone": None,
+        "story_plan": None,
         "title": None,
         "approved_chapters": [],
     }
@@ -145,22 +164,15 @@ def save_session(
 
         if existing:
             raise ValueError(
-                "You already started a story session today. "
+                "You already have a story session today. "
                 "Your existing session has been preserved."
             )
 
         cursor = db.execute("""
             INSERT INTO story_sessions (
-                user_id,
-                session_date,
-                board_path,
-                board_filename,
-                mime_type,
-                visual_analysis,
-                story_memory,
-                status,
-                created_at,
-                updated_at
+                user_id, session_date, board_path,
+                board_filename, mime_type, visual_analysis,
+                story_memory, status, created_at, updated_at
             )
             VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
         """, (
@@ -179,20 +191,22 @@ def save_session(
         return cursor.lastrowid
 
 
-def save_question(session_id, question, options):
+def get_answers(session_id):
     with connect_db() as db:
-        db.execute("""
-            UPDATE story_sessions
-            SET current_question = ?,
-                current_options = ?,
-                updated_at = ?
-            WHERE id = ?
-        """, (
-            question,
-            json.dumps(options, ensure_ascii=False),
-            datetime.utcnow().isoformat(),
-            session_id,
-        ))
+        rows = db.execute("""
+            SELECT question, answer
+            FROM story_answers
+            WHERE session_id = ?
+            ORDER BY id
+        """, (session_id,)).fetchall()
+
+    return [
+        {
+            "question": row["question"],
+            "answer": row["answer"],
+        }
+        for row in rows
+    ]
 
 
 def save_answer(session_id, question, answer):
@@ -239,38 +253,23 @@ def save_answer(session_id, question, answer):
 
 
 # ==========================================
-# DISCORD BOT
+# AI SYSTEM
 # ==========================================
-
-intents = discord.Intents.default()
-intents.message_content = True
-
-bot = commands.Bot(
-    command_prefix="!",
-    intents=intents,
-)
 
 ai_manager = AIManager()
-
-
-# ==========================================
-# AI HELPERS
-# ==========================================
 
 VISUAL_ANALYSIS_PROMPT = """
 You are the private visual-analysis system of Yeosang Novel.
 
-Inspect the uploaded collection board carefully.
+Carefully inspect the collection board.
 
-Describe visible characters, clothing, expressions, objects,
-symbols, backgrounds, atmosphere, and possible relationships.
+Describe visible characters, appearance, clothing, expressions,
+objects, symbols, backgrounds, atmosphere, and possible dynamics.
 
-Separate direct visual observations from interpretations.
-Do not invent character names or claim unsupported facts.
-Do not write a story or display story ideas to the user.
-
-Your analysis will be stored in a private story file and used
-to help the user develop an original novel.
+Separate direct observations from interpretations.
+Do not invent names or unsupported facts.
+Do not write a novel.
+This analysis is private and will help the user develop a story.
 """
 
 
@@ -284,8 +283,7 @@ def unpack_ai_result(result):
 
 
 def generate_text(prompt):
-    result = ai_manager.generate_text(prompt)
-    return unpack_ai_result(result)
+    return unpack_ai_result(ai_manager.generate_text(prompt))
 
 
 def extract_json(text):
@@ -293,37 +291,34 @@ def extract_json(text):
 
     if text.startswith("```"):
         lines = text.splitlines()
+
         if lines and lines[0].startswith("```"):
             lines = lines[1:]
+
         if lines and lines[-1].startswith("```"):
             lines = lines[:-1]
+
         text = "\n".join(lines).strip()
 
     start = text.find("{")
     end = text.rfind("}")
 
-    if start == -1 or end == -1 or end <= start:
+    if start < 0 or end <= start:
         raise ValueError("The AI did not return valid JSON.")
 
     return json.loads(text[start:end + 1])
 
 
-def get_answers(session_id):
-    with connect_db() as db:
-        rows = db.execute("""
-            SELECT question, answer
-            FROM story_answers
-            WHERE session_id = ?
-            ORDER BY id
-        """, (session_id,)).fetchall()
+# ==========================================
+# STORY READINESS DECISION
+# ==========================================
 
-    return [
-        {"question": row["question"], "answer": row["answer"]}
-        for row in rows
-    ]
+def evaluate_story(session_id):
+    """
+    The AI decides whether another question is necessary
+    or whether the story is ready for the final plan.
+    """
 
-
-def create_next_question(session_id):
     session = get_session(session_id)
 
     if not session:
@@ -332,83 +327,268 @@ def create_next_question(session_id):
     answers = get_answers(session_id)
 
     prompt = f"""
-You are Yeosang, an organized and thoughtful novel-writing
-companion. Help the user build a novel from their collection.
+You are Yeosang, an adaptive novel-writing companion.
 
-Ask exactly ONE useful question at a time.
+Your job is to help the user develop a coherent original novel
+from a collection board. Ask only questions that genuinely help.
 
-Do not write a story yet.
-Do not dump a list of questions into chat.
-Do not repeat questions the user has already answered.
-Adapt your next question to their previous answers.
-Prefer simple choices rather than requiring long paragraphs.
+You must decide after every answer whether the story has enough
+information to prepare a strong final story plan.
 
-Use the visual analysis as inspiration, not as fixed story canon.
-Let the user take the story in an unexpected direction.
+Do not follow a fixed question count.
+Do not ask questions just to prolong the interview.
+A detailed answer may resolve several story decisions at once.
+Ask follow-up questions only when important information is missing.
+
+The user should not have to invent every detail. You may propose
+creative ideas, but important story direction must respect their
+answers. Do not treat visual interpretations as confirmed facts.
 
 VISUAL ANALYSIS:
 {session["visual_analysis"][:12000]}
 
-PREVIOUS ANSWERS:
+USER'S ANSWERS:
 {json.dumps(answers, ensure_ascii=False)}
 
-Return only a JSON object in this exact format:
+Choose ONE status:
+
+1. "ask": an important story decision is still missing.
+2. "ready": enough information exists to create a strong plan.
+
+When choosing "ask", return:
 {{
-  "question": "One short question for the user",
+  "status": "ask",
+  "question": "One natural, useful question",
   "options": [
-    {{"label": "Short option", "value": "Meaning of choice"}},
-    {{"label": "Short option", "value": "Meaning of choice"}},
-    {{"label": "Short option", "value": "Meaning of choice"}},
+    {{"label": "Short choice", "value": "Meaning"}},
+    {{"label": "Short choice", "value": "Meaning"}},
+    {{"label": "Short choice", "value": "Meaning"}},
     {{"label": "Something else", "value": "Let me choose another direction"}}
   ]
 }}
 
-Rules:
-- Return between 2 and 5 options.
-- Keep each option label short enough for a Discord menu.
-- Make the options meaningfully different.
-- The final option should let the user steer the story themselves.
-- Do not include Markdown outside the JSON.
+When choosing "ready", return:
+{{
+  "status": "ready",
+  "plan": {{
+    "premise": "The core story in a short paragraph",
+    "characters": "Main characters and their roles",
+    "relationship": "Important relationship dynamics",
+    "setting": "Where and when the story takes place",
+    "conflict": "The central problem and stakes",
+    "major_secret": "A secret or mystery, if appropriate",
+    "ending": "The intended ending and emotional tone",
+    "chapter_arc": "How the story can develop across ten chapters"
+  }},
+  "titles": [
+    "Title option one",
+    "Title option two",
+    "Title option three",
+    "Title option four"
+  ]
+}}
+
+Readiness rules:
+- Important characters and the central premise must be clear.
+- The main conflict should be understandable.
+- The direction of the ending should be sufficiently clear.
+- Use reasonable creative judgment for minor missing details.
+- Do not force every optional category into the story.
+- Do not ask about details already answered.
+- Keep questions simple and relevant.
+- If ready, create a coherent plan suitable for a ten-chapter novel.
+- Suggest four distinct, fitting titles.
+- Return valid JSON only. No Markdown outside the JSON.
 """
 
     result, provider = generate_text(prompt)
     data = extract_json(result)
 
-    question = str(data.get("question", "")).strip()
-    options = data.get("options", [])
+    status = data.get("status")
 
-    if not question or not isinstance(options, list):
-        raise ValueError("The AI returned an incomplete question.")
+    if status == "ask":
+        question = str(data.get("question", "")).strip()
+        options = data.get("options", [])
 
-    clean_options = []
+        clean_options = []
 
-    for option in options[:5]:
-        if not isinstance(option, dict):
-            continue
+        if not question or not isinstance(options, list):
+            raise ValueError("The AI returned an incomplete question.")
 
-        label = str(option.get("label", "")).strip()
-        value = str(option.get("value", "")).strip()
+        for option in options[:5]:
+            if not isinstance(option, dict):
+                continue
 
-        if label and value:
-            clean_options.append({
-                "label": label[:100],
-                "value": value[:500],
-            })
+            label = str(option.get("label", "")).strip()
+            value = str(option.get("value", "")).strip()
 
-    if not clean_options:
-        raise ValueError("The AI did not provide usable choices.")
+            if label and value:
+                clean_options.append({
+                    "label": label[:100],
+                    "value": value[:500],
+                })
 
-    return question, clean_options, provider
+        if not clean_options:
+            raise ValueError("The AI returned no usable choices.")
+
+        return {
+            "status": "ask",
+            "question": question,
+            "options": clean_options,
+            "provider": provider,
+        }
+
+    if status == "ready":
+        plan = data.get("plan")
+        titles = data.get("titles", [])
+
+        required_fields = (
+            "premise",
+            "characters",
+            "relationship",
+            "setting",
+            "conflict",
+            "ending",
+            "chapter_arc",
+        )
+
+        if not isinstance(plan, dict):
+            raise ValueError("The AI returned an incomplete story plan.")
+
+        for field in required_fields:
+            if not str(plan.get(field, "")).strip():
+                raise ValueError(
+                    f"The story plan is missing: {field}"
+                )
+
+        if not isinstance(titles, list):
+            titles = []
+
+        titles = [
+            str(title).strip()[:100]
+            for title in titles
+            if str(title).strip()
+        ][:4]
+
+        if not titles:
+            titles = ["A Story Yet to Be Named"]
+
+        return {
+            "status": "ready",
+            "plan": plan,
+            "titles": titles,
+            "provider": provider,
+        }
+
+    raise ValueError("The AI returned an unknown readiness status.")
+
+
+def save_question(session_id, question, options):
+    with connect_db() as db:
+        db.execute("""
+            UPDATE story_sessions
+            SET current_question = ?,
+                current_options = ?,
+                status = 'developing',
+                plan_status = 'developing',
+                updated_at = ?
+            WHERE id = ?
+        """, (
+            question,
+            json.dumps(options, ensure_ascii=False),
+            datetime.utcnow().isoformat(),
+            session_id,
+        ))
+
+
+def save_plan(session_id, plan, titles):
+    with connect_db() as db:
+        row = db.execute("""
+            SELECT story_memory
+            FROM story_sessions
+            WHERE id = ?
+        """, (session_id,)).fetchone()
+
+        if not row:
+            raise ValueError("Story session not found.")
+
+        memory = json.loads(row["story_memory"])
+        memory["story_plan"] = plan
+
+        db.execute("""
+            UPDATE story_sessions
+            SET story_plan = ?,
+                title_options = ?,
+                story_memory = ?,
+                current_question = NULL,
+                current_options = NULL,
+                status = 'plan_ready',
+                plan_status = 'awaiting_approval',
+                updated_at = ?
+            WHERE id = ?
+        """, (
+            json.dumps(plan, ensure_ascii=False),
+            json.dumps(titles, ensure_ascii=False),
+            json.dumps(memory, ensure_ascii=False),
+            datetime.utcnow().isoformat(),
+            session_id,
+        ))
 
 
 # ==========================================
-# QUESTION MENU
+# STORY PLAN DISPLAY
+# ==========================================
+
+def build_plan_embed(session_id):
+    session = get_session(session_id)
+    plan = json.loads(session["story_plan"])
+
+    embed = discord.Embed(
+        title="Your Story Plan",
+        description=(
+            "Yeosang has enough information to prepare your story.\n"
+            "Review the plan below before writing begins."
+        ),
+        color=discord.Color.from_rgb(78, 0, 23),
+    )
+
+    fields = [
+        ("Premise", "premise"),
+        ("Main Characters", "characters"),
+        ("Relationships", "relationship"),
+        ("Setting", "setting"),
+        ("Central Conflict", "conflict"),
+        ("Secret or Mystery", "major_secret"),
+        ("Ending Direction", "ending"),
+        ("Ten-Chapter Journey", "chapter_arc"),
+    ]
+
+    for label, key in fields:
+        value = str(plan.get(key, "")).strip()
+
+        if value:
+            embed.add_field(
+                name=label,
+                value=value[:1024],
+                inline=False,
+            )
+
+    embed.set_footer(
+        text="Review the plan • Approve it or request changes"
+    )
+
+    return embed
+
+
+# ==========================================
+# STORY QUESTION INTERFACE
 # ==========================================
 
 class StoryQuestionSelect(discord.ui.Select):
     def __init__(self, session_id, question, options):
         self.session_id = session_id
         self.question = question
+        self.option_values = options
 
         menu_options = [
             discord.SelectOption(
@@ -419,10 +599,8 @@ class StoryQuestionSelect(discord.ui.Select):
             for index, option in enumerate(options)
         ]
 
-        self.option_values = options
-
         super().__init__(
-            placeholder="Choose the direction of your story...",
+            placeholder="Choose your story direction...",
             min_values=1,
             max_values=1,
             options=menu_options,
@@ -440,14 +618,12 @@ class StoryQuestionSelect(discord.ui.Select):
 
         if session["current_question"] != self.question:
             await interaction.response.send_message(
-                "This question is no longer active. "
-                "Please use your latest story question.",
+                "This question is no longer active.",
                 ephemeral=True,
             )
             return
 
-        selected_index = int(self.values[0])
-        selected = self.option_values[selected_index]
+        selected = self.option_values[int(self.values[0])]
 
         await interaction.response.defer()
 
@@ -458,53 +634,62 @@ class StoryQuestionSelect(discord.ui.Select):
                 selected["value"],
             )
 
-            next_question, options, provider = create_next_question(
-                self.session_id
-            )
+            decision = evaluate_story(self.session_id)
 
-            save_question(
-                self.session_id,
-                next_question,
-                options,
-            )
+            if decision["status"] == "ask":
+                save_question(
+                    self.session_id,
+                    decision["question"],
+                    decision["options"],
+                )
 
-            embed = discord.Embed(
-                title="Yeosang's Story Room",
-                description=(
-                    f"**Your choice:** {selected['label']}\n\n"
-                    f"**{next_question}**"
-                ),
-                color=discord.Color.from_rgb(78, 0, 23),
-            )
+                embed = discord.Embed(
+                    title="Yeosang's Story Room",
+                    description=(
+                        f"**Your choice:** {selected['label']}\n\n"
+                        f"**{decision['question']}**"
+                    ),
+                    color=discord.Color.from_rgb(78, 0, 23),
+                )
 
-            embed.set_footer(
-                text="One question at a time • Your story, your choices"
-            )
+                embed.set_footer(
+                    text="One question at a time • Your story, your choices"
+                )
 
-            view = StoryQuestionView(
-                self.session_id,
-                next_question,
-                options,
-            )
+                await interaction.edit_original_response(
+                    content=None,
+                    embed=embed,
+                    view=StoryQuestionView(
+                        self.session_id,
+                        decision["question"],
+                        decision["options"],
+                    ),
+                )
 
-            await interaction.edit_original_response(
-                content=None,
-                embed=embed,
-                view=view,
-            )
+            else:
+                save_plan(
+                    self.session_id,
+                    decision["plan"],
+                    decision["titles"],
+                )
 
-            logging.info(
-                "Next question created using %s for session %s",
-                provider,
-                self.session_id,
-            )
+                embed = build_plan_embed(self.session_id)
+
+                await interaction.edit_original_response(
+                    content=(
+                        "🖤 **Story development is complete.** "
+                        "No more questions for now."
+                    ),
+                    embed=embed,
+                    view=StoryPlanView(self.session_id),
+                )
 
         except Exception:
             logging.exception("Failed to process story answer")
 
             await interaction.followup.send(
-                "I saved your answer, but couldn't prepare the next "
-                "question just now. Please try again shortly.",
+                "Your answer was saved, but Yeosang couldn't "
+                "prepare the next step. Please try again.",
                 ephemeral=True,
             )
 
@@ -514,27 +699,267 @@ class StoryQuestionView(discord.ui.View):
         super().__init__(timeout=86400)
 
         self.add_item(
-            StoryQuestionSelect(
-                session_id,
-                question,
-                options,
-            )
+            StoryQuestionSelect(session_id, question, options)
         )
 
 
 # ==========================================
-# BOT READY
+# STORY PLAN APPROVAL AND REVISION
 # ==========================================
 
-@bot.event
-async def on_ready():
-    logging.info("Logged in as %s (%s)", bot.user, bot.user.id)
+class StoryRevisionModal(discord.ui.Modal):
+    def __init__(self, session_id):
+        super().__init__(title="Revise Your Story Plan")
 
-    try:
-        synced = await bot.tree.sync()
-        logging.info("Synced %s slash command(s)", len(synced))
-    except Exception:
-        logging.exception("Slash command sync failed")
+        self.session_id = session_id
+
+        self.revision = discord.ui.TextInput(
+            label="What would you like to change?",
+            placeholder=(
+                "Example: Make the relationship darker, "
+                "change the setting, or add a betrayal."
+            ),
+            style=discord.TextStyle.paragraph,
+            max_length=1500,
+            required=True,
+        )
+
+        self.add_item(self.revision)
+
+    async def on_submit(self, interaction: discord.Interaction):
+        session = get_session(self.session_id)
+
+        if not session or session["user_id"] != str(interaction.user.id):
+            await interaction.response.send_message(
+                "This story session belongs to another writer.",
+                ephemeral=True,
+            )
+            return
+
+        await interaction.response.defer(thinking=True)
+
+        try:
+            save_answer(
+                self.session_id,
+                "Requested changes to the story plan",
+                self.revision.value,
+            )
+
+            decision = evaluate_story(self.session_id)
+
+            if decision["status"] == "ask":
+                save_question(
+                    self.session_id,
+                    decision["question"],
+                    decision["options"],
+                )
+
+                embed = discord.Embed(
+                    title="Let's Refine the Story",
+                    description=(
+                        "I'll clarify one more detail before "
+                        "preparing the revised plan.\n\n"
+                        f"**{decision['question']}**"
+                    ),
+                    color=discord.Color.from_rgb(78, 0, 23),
+                )
+
+                await interaction.followup.send(
+                    embed=embed,
+                    view=StoryQuestionView(
+                        self.session_id,
+                        decision["question"],
+                        decision["options"],
+                    ),
+                )
+
+            else:
+                save_plan(
+                    self.session_id,
+                    decision["plan"],
+                    decision["titles"],
+                )
+
+                await interaction.followup.send(
+                    "🖤 **Here's your revised story plan.**",
+                    embed=build_plan_embed(self.session_id),
+                    view=StoryPlanView(self.session_id),
+                )
+
+        except Exception:
+            logging.exception("Failed to revise story plan")
+
+            await interaction.followup.send(
+                "I couldn't revise the plan right now. "
+                "Please try again.",
+                ephemeral=True,
+            )
+
+
+class StoryPlanView(discord.ui.View):
+    def __init__(self, session_id):
+        super().__init__(timeout=86400)
+        self.session_id = session_id
+
+    async def interaction_check(self, interaction):
+        session = get_session(self.session_id)
+
+        if not session or session["user_id"] != str(interaction.user.id):
+            await interaction.response.send_message(
+                "Only the writer who started this story can approve it.",
+                ephemeral=True,
+            )
+            return False
+
+        return True
+
+    @discord.ui.button(
+        label="Approve Story Plan",
+        style=discord.ButtonStyle.success,
+        emoji="📖",
+    )
+    async def approve_plan(self, interaction, button):
+        session = get_session(self.session_id)
+
+        if session["plan_status"] != "awaiting_approval":
+            await interaction.response.send_message(
+                "This plan has already been approved or replaced.",
+                ephemeral=True,
+            )
+            return
+
+        titles = json.loads(session["title_options"] or "[]")
+
+        if not titles:
+            titles = ["A Story Yet to Be Named"]
+
+        with connect_db() as db:
+            db.execute("""
+                UPDATE story_sessions
+                SET plan_status = 'approved',
+                    status = 'title_selection',
+                    updated_at = ?
+                WHERE id = ?
+            """, (
+                datetime.utcnow().isoformat(),
+                self.session_id,
+            ))
+
+        await interaction.response.send_message(
+            "Your story plan is approved! Now choose its title.",
+            embed=discord.Embed(
+                title="Choose Your Novel's Title",
+                description="\n".join(
+                    f"**{index + 1}.** {title}"
+                    for index, title in enumerate(titles)
+                ),
+                color=discord.Color.from_rgb(78, 0, 23),
+            ),
+            view=StoryTitleView(self.session_id, titles),
+        )
+
+        self.stop()
+
+    @discord.ui.button(
+        label="Request Changes",
+        style=discord.ButtonStyle.secondary,
+        emoji="✏️",
+    )
+    async def request_changes(self, interaction, button):
+        await interaction.response.send_modal(
+            StoryRevisionModal(self.session_id)
+        )
+
+
+# ==========================================
+# TITLE SELECTION
+# ==========================================
+
+class StoryTitleSelect(discord.ui.Select):
+    def __init__(self, session_id, titles):
+        self.session_id = session_id
+        self.titles = titles
+
+        options = [
+            discord.SelectOption(
+                label=title[:100],
+                value=str(index),
+            )
+            for index, title in enumerate(titles[:25])
+        ]
+
+        super().__init__(
+            placeholder="Choose the title of your novel...",
+            min_values=1,
+            max_values=1,
+            options=options,
+        )
+
+    async def callback(self, interaction: discord.Interaction):
+        session = get_session(self.session_id)
+
+        if not session or session["user_id"] != str(interaction.user.id):
+            await interaction.response.send_message(
+                "This story session belongs to another writer.",
+                ephemeral=True,
+            )
+            return
+
+        if session["plan_status"] != "approved":
+            await interaction.response.send_message(
+                "Approve the story plan before choosing a title.",
+                ephemeral=True,
+            )
+            return
+
+        title = self.titles[int(self.values[0])]
+
+        with connect_db() as db:
+            row = db.execute("""
+                SELECT story_memory
+                FROM story_sessions
+                WHERE id = ?
+            """, (self.session_id,)).fetchone()
+
+            memory = json.loads(row["story_memory"])
+            memory["title"] = title
+
+            db.execute("""
+                UPDATE story_sessions
+                SET chosen_title = ?,
+                    story_memory = ?,
+                    status = 'ready_to_write',
+                    updated_at = ?
+                WHERE id = ?
+            """, (
+                title,
+                json.dumps(memory, ensure_ascii=False),
+                datetime.utcnow().isoformat(),
+                self.session_id,
+            ))
+
+        embed = discord.Embed(
+            title="Your Novel Is Ready",
+            description=(
+                f"**{title}**\n\n"
+                "Your story plan has been approved, and your title "
+                "has been saved.\n\n"
+                "The next step is to generate Chapter 1 with `/write`."
+            ),
+            color=discord.Color.from_rgb(78, 0, 23),
+        )
+
+        await interaction.response.edit_message(
+            content=None,
+            embed=embed,
+            view=None,
+        )
+
+
+class StoryTitleView(discord.ui.View):
+    def __init__(self, session_id, titles):
+        super().__init__(timeout=86400)
+        self.add_item(StoryTitleSelect(session_id, titles))
 
 
 # ==========================================
@@ -552,15 +977,12 @@ async def novel(
     interaction: discord.Interaction,
     board: discord.Attachment,
 ):
-    await interaction.response.defer(thinking=True, ephemeral=False)
+    await interaction.response.defer(thinking=True)
 
-    existing = get_todays_session(interaction.user.id)
-
-    if existing:
+    if get_todays_session(interaction.user.id):
         await interaction.followup.send(
-            "🖤 **Today's story session already exists.**\n\n"
-            "Your collection board and story memory are safe. "
-            "We'll add the remaining story controls next.",
+            "🖤 You already have a story session today. "
+            "Your saved session has been preserved.",
             ephemeral=True,
         )
         return
@@ -586,10 +1008,9 @@ async def novel(
         )
         return
 
-    if board.size > 15 * 1024 * 1024:
+    if board.size > MAX_IMAGE_SIZE:
         await interaction.followup.send(
-            "That image is larger than Yeosang's current "
-            "15 MB limit. Please upload a smaller image.",
+            "Please upload an image smaller than 15 MB.",
             ephemeral=True,
         )
         return
@@ -598,11 +1019,12 @@ async def novel(
         response = requests.get(board.url, timeout=30)
         response.raise_for_status()
         image_bytes = response.content
+
     except requests.RequestException:
         logging.exception("Failed to download collection board")
 
         await interaction.followup.send(
-            "I couldn't retrieve that image. Please try again.",
+            "I couldn't retrieve the uploaded image. Please try again.",
             ephemeral=True,
         )
         return
@@ -620,10 +1042,8 @@ async def novel(
     )
 
     try:
-        # Save the original image for this session.
         board_path.write_bytes(image_bytes)
 
-        # Analyze privately. The raw analysis is not posted to Discord.
         analysis_result = ai_manager.analyze_image(
             image_bytes=image_bytes,
             mime_type=mime_type,
@@ -642,64 +1062,69 @@ async def novel(
             visual_analysis=visual_analysis,
         )
 
-        question, options, question_provider = create_next_question(
-            session_id
+        decision = evaluate_story(session_id)
+
+        if decision["status"] == "ask":
+            save_question(
+                session_id,
+                decision["question"],
+                decision["options"],
+            )
+
+            embed = discord.Embed(
+                title="Yeosang's Story Room",
+                description=(
+                    "Your collection has been saved for today's story.\n\n"
+                    f"**{decision['question']}**\n\n"
+                    "Choose an option below. Your answer will shape "
+                    "the next question."
+                ),
+                color=discord.Color.from_rgb(78, 0, 23),
+            )
+
+            embed.set_thumbnail(url=board.url)
+            embed.set_footer(
+                text="Your story • Your choices • One question at a time"
+            )
+
+            view = StoryQuestionView(
+                session_id,
+                decision["question"],
+                decision["options"],
+            )
+
+            await interaction.followup.send(
+                embed=embed,
+                view=view,
+            )
+
+        else:
+            save_plan(
+                session_id,
+                decision["plan"],
+                decision["titles"],
+            )
+
+            await interaction.followup.send(
+                "🖤 **Yeosang has enough information to begin.**",
+                embed=build_plan_embed(session_id),
+                view=StoryPlanView(session_id),
+            )
+
+        logging.info(
+            "Session %s started. Vision provider: %s",
+            session_id,
+            vision_provider,
         )
-
-        save_question(session_id, question, options)
-
-    except ValueError as error:
-        logging.warning("Could not start story session: %s", error)
-
-        await interaction.followup.send(
-            f"🖤 {error}",
-            ephemeral=True,
-        )
-        return
 
     except Exception:
         logging.exception("Failed to initialize story session")
 
         await interaction.followup.send(
-            "I couldn't prepare today's story session. "
-            "Please try again later.",
+            "I couldn't prepare the story session. "
+            "Please check the Render logs for the error.",
             ephemeral=True,
         )
-        return
-
-    embed = discord.Embed(
-        title="Yeosang's Story Room",
-        description=(
-            "Your collection has been saved for today's story session.\n\n"
-            f"**{question}**\n\n"
-            "Choose an option below. I'll use your answer to decide "
-            "what to ask next."
-        ),
-        color=discord.Color.from_rgb(78, 0, 23),
-    )
-
-    embed.set_thumbnail(url=board.url)
-    embed.set_footer(
-        text="Your story • Your choices • One question at a time"
-    )
-
-    view = StoryQuestionView(
-        session_id,
-        question,
-        options,
-    )
-
-    await interaction.followup.send(
-        embed=embed,
-        view=view,
-    )
-
-    logging.info(
-        "Started session %s | Vision: %s | Questions: %s",
-        session_id,
-        vision_provider,
-        question_provider,
-    )
 
 
 # ==========================================
