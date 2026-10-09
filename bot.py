@@ -30,6 +30,7 @@ BOARD_FOLDER.mkdir(parents=True, exist_ok=True)
 
 MAX_IMAGE_SIZE = 15 * 1024 * 1024
 EMBED_COLOR = discord.Color.from_rgb(78, 0, 23)
+MAX_CHAPTERS = 10
 
 app = Flask(__name__)
 ai_manager = AIManager()
@@ -73,7 +74,7 @@ def today_string():
 
 
 def connect_db():
-    db = sqlite3.connect(DATABASE_PATH)
+    db = sqlite3.connect(DATABASE_PATH, timeout=30)
     db.row_factory = sqlite3.Row
     db.execute("PRAGMA foreign_keys = ON")
     return db
@@ -141,7 +142,7 @@ initialize_database()
 
 
 # ==================================================
-# SESSION HELPERS
+# STORY MEMORY
 # ==================================================
 
 def get_session(session_id):
@@ -163,14 +164,65 @@ def get_todays_session(user_id):
 
 def get_memory(session):
     try:
-        return json.loads(session["story_memory"] or "{}")
+        memory = json.loads(session["story_memory"] or "{}")
     except (TypeError, json.JSONDecodeError):
-        return {}
+        memory = {}
+
+    defaults = {
+        "collection": {},
+        "user_choices": [],
+        "story_plan": None,
+        "title": None,
+        "approved_chapters": [],
+        "character_tracker": [],
+        "brainstormed_ideas": [],
+        "approved_twists": [],
+        "foreshadowing": [],
+        "continuity_rules": [],
+        "unresolved_threads": [],
+        "chapter_notes": [],
+        "pending_memory_update": None,
+        "rejected_ideas": [],
+    }
+
+    for key, default in defaults.items():
+        if key not in memory:
+            memory[key] = default.copy() if isinstance(default, (list, dict)) else default
+
+    return memory
+
+
+def save_memory(session_id, memory):
+    with connect_db() as db:
+        db.execute("""
+            UPDATE story_sessions
+            SET story_memory = ?, updated_at = ?
+            WHERE id = ?
+        """, (
+            json.dumps(memory, ensure_ascii=False),
+            now_string(),
+            session_id,
+        ))
 
 
 def get_approved_chapters(session):
     chapters = get_memory(session).get("approved_chapters", [])
     return chapters if isinstance(chapters, list) else []
+
+
+def get_answers(session_id):
+    with connect_db() as db:
+        rows = db.execute("""
+            SELECT question, answer
+            FROM story_answers
+            WHERE session_id = ?
+            ORDER BY id
+        """, (session_id,)).fetchall()
+
+    return [
+        {"question": row["question"], "answer": row["answer"]}
+        for row in rows
+    ]
 
 
 def unpack_ai_result(result):
@@ -224,6 +276,15 @@ def save_session(
         "story_plan": None,
         "title": None,
         "approved_chapters": [],
+        "character_tracker": [],
+        "brainstormed_ideas": [],
+        "approved_twists": [],
+        "foreshadowing": [],
+        "continuity_rules": [],
+        "unresolved_threads": [],
+        "chapter_notes": [],
+        "pending_memory_update": None,
+        "rejected_ideas": [],
     }
 
     with connect_db() as db:
@@ -260,31 +321,22 @@ def save_session(
         return cursor.lastrowid
 
 
-def get_answers(session_id):
-    with connect_db() as db:
-        rows = db.execute("""
-            SELECT question, answer
-            FROM story_answers
-            WHERE session_id = ?
-            ORDER BY id
-        """, (session_id,)).fetchall()
-
-    return [
-        {"question": row["question"], "answer": row["answer"]}
-        for row in rows
-    ]
-
-
 def save_answer(session_id, question, answer):
     with connect_db() as db:
         row = db.execute("""
-            SELECT story_memory FROM story_sessions WHERE id = ?
+            SELECT story_memory
+            FROM story_sessions
+            WHERE id = ?
         """, (session_id,)).fetchone()
 
         if not row:
             raise ValueError("Story session not found.")
 
-        memory = json.loads(row["story_memory"] or "{}")
+        try:
+            memory = json.loads(row["story_memory"] or "{}")
+        except json.JSONDecodeError:
+            memory = {}
+
         memory.setdefault("user_choices", []).append({
             "question": question,
             "answer": answer,
@@ -323,12 +375,76 @@ Inspect the collection board carefully.
 Describe visible characters, appearance, clothing, expressions,
 objects, symbols, backgrounds, atmosphere, and possible dynamics.
 
+Identify distinct visible characters when possible. Describe each
+one separately so the writing system can track the intended cast.
+
 Separate direct observations from interpretations.
 Do not invent names or unsupported facts.
 Do not assume visual interpretations are confirmed canon.
 Do not write a story or expose this analysis directly to the user.
 
 This analysis will help the user develop an original novel.
+"""
+
+
+# ==================================================
+# CREATIVE CO-AUTHOR INSTRUCTIONS
+# ==================================================
+
+CREATIVE_DIRECTIVE = """
+CREATIVE CO-AUTHOR MODE: YEOSANG
+
+You are not merely a question generator or a passive writing tool.
+You are an imaginative, proactive novel-writing partner.
+
+INDEPENDENT BRAINSTORMING:
+- Develop your own original plot ideas, secrets, conflicts,
+  mysteries, reversals, emotional moments, and revelations.
+- Do not wait for the user to invent every development.
+- Look for less obvious but coherent possibilities.
+- Prefer twists that change the meaning of earlier events.
+- Plant clues before revelations and make consequences matter.
+- Avoid random shock twists, convenient coincidences, and clichés
+  unless deliberately transformed into something fresh.
+- Maintain a private pool of possible ideas and remember them.
+- Distinguish suggestions from user-approved story canon.
+
+ALL SIX CHARACTERS ARE ESSENTIAL:
+- The intended novel has six important characters.
+- Track all six separately throughout planning and writing.
+- Give each a distinct identity, motivation, personality,
+  relationships, strengths, weaknesses, and meaningful agency.
+- Give every character a genuine contribution to the plot.
+- Do not reduce any of the six to a decorative background role.
+- Do not let only two or three characters dominate the entire novel.
+- Track each character's appearances, decisions, development,
+  secrets, relationships, and consequences.
+- Use the board analysis and user answers to identify the cast.
+- Never fabricate character names or claim uncertain identities
+  are confirmed.
+- If the six intended characters cannot be identified confidently,
+  ask the user a focused question before finalising the plan.
+
+STORY QUALITY:
+- The novel must have exactly ten chapters.
+- Every chapter must advance the plot, a character arc,
+  a relationship, a mystery, or the stakes.
+- Balance tension, emotional depth, atmosphere, dialogue,
+  quiet scenes, and meaningful surprises.
+- Avoid repetitive scenes, empty exposition, rushed resolutions,
+  and summaries that replace actual dramatic scenes.
+- Give chapter endings a reason to keep reading.
+- Make the ending feel earned by the story's earlier events.
+
+CONTINUITY:
+- Treat approved story decisions and approved chapters as canon.
+- Track clues, promises, unresolved questions, relationships,
+  character changes, world rules, and planned revelations.
+- Never silently contradict established facts.
+- Preserve the user's final decisions.
+- Do not turn a brainstormed possibility into canon without approval.
+- When writing a chapter, consult the approved plan, character
+  tracker, continuity rules, and every previous approved chapter.
 """
 
 
@@ -342,17 +458,28 @@ def evaluate_story(session_id):
     if not session:
         raise ValueError("Story session not found.")
 
-    prompt = f"""
-You are Yeosang, a novel-writing companion.
+    memory = get_memory(session)
 
-Help the user develop an original novel based on their collection
+    prompt = f"""
+{CREATIVE_DIRECTIVE}
+
+Help the user develop an original novel using their collection
 board and their answers.
 
-Ask one question at a time. After every answer, decide whether
-important story information is missing or the story is ready.
+Ask ONE useful question at a time. After each answer, decide
+whether essential story information is missing or the story is
+ready for a strong ten-chapter plan.
 
-Do not use a fixed question count. Respect user choices and use
-creative judgment for details they leave open.
+Do not use a fixed question count. Respect user choices.
+You may make creative decisions for details the user leaves open,
+but do not invent the identities of the six intended characters.
+
+Think independently before responding:
+1. Identify the most interesting story possibilities.
+2. Consider hidden motives, conflicts, reversals, and emotional stakes.
+3. Consider how all six characters can influence events.
+4. Look for foreshadowing that can pay off later.
+5. Choose the next question only if the answer will improve the story.
 
 PRIVATE VISUAL ANALYSIS:
 {session["visual_analysis"][:12000]}
@@ -360,9 +487,12 @@ PRIVATE VISUAL ANALYSIS:
 USER ANSWERS:
 {json.dumps(get_answers(session_id), ensure_ascii=False)}
 
+EXISTING STORY MEMORY:
+{json.dumps(memory, ensure_ascii=False)[:14000]}
+
 Return valid JSON only.
 
-If more information is needed:
+IF MORE INFORMATION IS NEEDED:
 {{
   "status": "ask",
   "question": "One useful question",
@@ -374,25 +504,47 @@ If more information is needed:
   ]
 }}
 
-If ready:
+IF READY:
 {{
   "status": "ready",
   "plan": {{
     "premise": "Central premise",
-    "characters": "Main characters and roles",
-    "relationship": "Important relationships",
-    "setting": "Setting",
-    "conflict": "Central conflict",
-    "major_secret": "Secret or mystery, if appropriate",
+    "characters": "All six intended characters and their identities or roles",
+    "character_arcs": "A distinct arc and meaningful contribution for each of the six",
+    "relationship": "Important relationships and how they change",
+    "setting": "Setting and relevant world rules",
+    "conflict": "Central conflict and escalating stakes",
+    "major_secret": "Main mystery, hidden motives, or secret",
+    "brainstormed_ideas": ["Original idea one", "Original idea two"],
+    "major_twists": ["A coherent major twist", "Another possible twist"],
+    "foreshadowing": ["Clue and its planned payoff"],
+    "continuity_rules": ["Facts that must remain consistent"],
+    "unresolved_threads": ["Questions intentionally left open"],
     "ending": "Ending direction",
-    "chapter_arc": "A coherent ten-chapter outline"
+    "chapter_arc": "A coherent outline of exactly ten chapters",
+    "character_tracker": [
+      {{
+        "character": "Character identity grounded in the board or user answers",
+        "personality": "Personality",
+        "motivation": "Motivation",
+        "relationships": "Relationships",
+        "plot_contribution": "Meaningful contribution",
+        "arc": "Development across the story"
+      }}
+    ]
   }},
   "titles": ["Title one", "Title two", "Title three", "Title four"]
 }}
 
-The plan must support exactly ten chapters.
-Do not force unnecessary details.
-Return JSON only, without Markdown.
+Requirements:
+- The plan must support exactly ten chapters.
+- The character_tracker must contain six distinct intended characters.
+- Do not invent identities for characters who have not been established.
+- If the six characters cannot be identified confidently, return
+  status "ask" and ask the user for the missing information.
+- Include original creative ideas, meaningful twists, and foreshadowing.
+- Suggestions are not user-approved canon until the plan is approved.
+- Return JSON only, without Markdown.
 """
 
     result, provider = generate_text(prompt)
@@ -431,8 +583,14 @@ Return JSON only, without Markdown.
         titles = data.get("titles", [])
 
         required = [
-            "premise", "characters", "relationship",
-            "setting", "conflict", "ending", "chapter_arc",
+            "premise",
+            "characters",
+            "character_arcs",
+            "relationship",
+            "setting",
+            "conflict",
+            "ending",
+            "chapter_arc",
         ]
 
         if not isinstance(plan, dict):
@@ -442,9 +600,47 @@ Return JSON only, without Markdown.
             if not str(plan.get(key, "")).strip():
                 raise ValueError(f"Missing plan field: {key}")
 
-        if not isinstance(titles, list):
-            titles = []
+        tracker = plan.get("character_tracker", [])
+        if not isinstance(tracker, list) or len(tracker) != 6:
+            raise ValueError(
+                "The plan must track all six intended characters. "
+                "The AI did not return six distinct character records."
+            )
 
+        identities = [
+            str(item.get("character", "")).strip().casefold()
+            for item in tracker
+            if isinstance(item, dict)
+        ]
+
+        if len(identities) != 6 or any(not name for name in identities):
+            raise ValueError(
+                "The six-character tracker is incomplete."
+            )
+
+        if len(set(identities)) != 6:
+            raise ValueError(
+                "The character tracker contains duplicate identities."
+            )
+
+        for key in (
+            "brainstormed_ideas",
+            "major_twists",
+            "foreshadowing",
+            "continuity_rules",
+            "unresolved_threads",
+        ):
+            value = plan.get(key, [])
+            if not isinstance(value, list):
+                plan[key] = []
+            else:
+                plan[key] = [
+                    str(item).strip()
+                    for item in value
+                    if str(item).strip()
+                ][:15]
+
+        titles = titles if isinstance(titles, list) else []
         titles = [
             str(title).strip()[:100]
             for title in titles
@@ -485,14 +681,26 @@ def save_question(session_id, question, options):
 def save_plan(session_id, plan, titles):
     with connect_db() as db:
         row = db.execute("""
-            SELECT story_memory FROM story_sessions WHERE id = ?
+            SELECT story_memory
+            FROM story_sessions
+            WHERE id = ?
         """, (session_id,)).fetchone()
 
         if not row:
             raise ValueError("Story session not found.")
 
-        memory = json.loads(row["story_memory"] or "{}")
+        try:
+            memory = json.loads(row["story_memory"] or "{}")
+        except json.JSONDecodeError:
+            memory = {}
+
         memory["story_plan"] = plan
+        memory["character_tracker"] = plan.get("character_tracker", [])
+        memory["brainstormed_ideas"] = plan.get("brainstormed_ideas", [])
+        memory["approved_twists"] = []
+        memory["foreshadowing"] = plan.get("foreshadowing", [])
+        memory["continuity_rules"] = plan.get("continuity_rules", [])
+        memory["unresolved_threads"] = plan.get("unresolved_threads", [])
 
         db.execute("""
             UPDATE story_sessions
@@ -528,27 +736,45 @@ def build_plan_embed(session_id):
 
     embed = discord.Embed(
         title="Your Story Plan",
-        description="Review your story before approving it.",
+        description=(
+            "Review the story, the six-character cast, and the creative "
+            "direction before approving it."
+        ),
         color=EMBED_COLOR,
     )
 
-    for label, key in [
-        ("Premise", "premise"),
-        ("Main Characters", "characters"),
-        ("Relationships", "relationship"),
-        ("Setting", "setting"),
-        ("Central Conflict", "conflict"),
-        ("Secret or Mystery", "major_secret"),
-        ("Ending Direction", "ending"),
-        ("Ten-Chapter Journey", "chapter_arc"),
-    ]:
-        value = str(plan.get(key, "")).strip()
-        if value:
-            embed.add_field(
-                name=label,
-                value=value[:1024],
-                inline=False,
-            )
+    fields = [
+        ("Premise", "premise", 650),
+        ("All Six Characters", "characters", 800),
+        ("Character Arcs", "character_arcs", 800),
+        ("Relationships", "relationship", 500),
+        ("Setting and Conflict", "setting", 350),
+        ("Central Conflict", "conflict", 450),
+        ("Main Mystery", "major_secret", 400),
+        ("Creative Twists", "major_twists", 550),
+        ("Foreshadowing", "foreshadowing", 400),
+        ("Ten-Chapter Journey", "chapter_arc", 900),
+        ("Ending Direction", "ending", 450),
+    ]
+
+    remaining = 5200
+
+    for label, key, limit in fields:
+        value = plan.get(key, "")
+        if isinstance(value, list):
+            value = "\n".join(f"• {item}" for item in value)
+        value = str(value).strip()
+
+        if not value or remaining <= 0:
+            continue
+
+        value = value[:min(limit, remaining)]
+        embed.add_field(
+            name=label,
+            value=value,
+            inline=False,
+        )
+        remaining -= len(value) + len(label) + 10
 
     embed.set_footer(text="Approve the plan or request changes.")
     return embed
@@ -854,7 +1080,8 @@ class StoryTitleSelect(discord.ui.Select):
         with connect_db() as db:
             row = db.execute("""
                 SELECT story_memory
-                FROM story_sessions WHERE id = ?
+                FROM story_sessions
+                WHERE id = ?
             """, (self.session_id,)).fetchone()
 
             memory = json.loads(row["story_memory"] or "{}")
@@ -878,7 +1105,7 @@ class StoryTitleSelect(discord.ui.Select):
             title="Your Novel Is Ready",
             description=(
                 f"**{title}**\n\n"
-                "Your plan and title are saved.\n"
+                "Your plan, cast, and creative notes are saved.\n"
                 "Use `/write` to generate Chapter 1."
             ),
             color=EMBED_COLOR,
@@ -899,18 +1126,9 @@ class StoryTitleView(discord.ui.View):
 
 # ==================================================
 # CHAPTER DISPLAY
-# FIX: SEND EACH EMBED IN ITS OWN MESSAGE
 # ==================================================
 
 def split_chapter_text(text, limit=3500):
-    """
-    Split prose into safe-sized pieces.
-
-    Each embed gets at most 3500 characters of prose, leaving
-    room for its title and footer. Each embed is sent in its
-    own Discord message to avoid the 6000-character combined
-    embed limit per message.
-    """
     text = text.strip()
     chunks = []
 
@@ -978,13 +1196,6 @@ async def send_chapter_messages(
     view=None,
     content=None,
 ):
-    """
-    Send the first chapter section with the controls, then
-    send every remaining section as a separate message.
-
-    Never send the entire list using embeds= because Discord
-    limits combined embed text to 6000 characters per message.
-    """
     embeds = chapter_embeds(
         session,
         chapter_number,
@@ -1002,6 +1213,172 @@ async def send_chapter_messages(
         await destination.send(embed=embed)
 
     return first_message
+
+
+# ==================================================
+# PROVISIONAL CHAPTER MEMORY
+# ==================================================
+
+def update_pending_story_memory(session_id, chapter_number, chapter_text):
+    """
+    Ask the AI to record continuity notes for the current draft.
+
+    These notes remain provisional until /post approves the chapter.
+    If this additional AI call fails, the chapter draft is still saved.
+    """
+    session = get_session(session_id)
+    if not session:
+        return
+
+    memory = get_memory(session)
+    plan = json.loads(session["story_plan"] or "{}")
+    approved = get_approved_chapters(session)
+
+    prompt = f"""
+{CREATIVE_DIRECTIVE}
+
+You are maintaining the private story bible for this novel.
+
+Read the approved plan, existing memory, previous approved chapters,
+and the newest unapproved chapter draft.
+
+Do not rewrite the chapter. Return valid JSON only with this structure:
+
+{{
+  "chapter_note": "Important events and changes in this draft",
+  "character_updates": [
+    {{
+      "character": "One of the six established characters",
+      "change": "New action, decision, emotional change, or relationship change"
+    }}
+  ],
+  "new_ideas": ["Useful future possibilities, not yet canon"],
+  "twists_to_consider": ["Potential twist with setup and payoff"],
+  "foreshadowing": ["Clue planted and possible later payoff"],
+  "continuity_rules": ["New fact that must remain consistent"],
+  "unresolved_threads": ["Question or conflict still unresolved"]
+}}
+
+NOVEL:
+{session["chosen_title"]}
+
+APPROVED PLAN:
+{json.dumps(plan, ensure_ascii=False)[:10000]}
+
+EXISTING MEMORY:
+{json.dumps(memory, ensure_ascii=False)[:10000]}
+
+PREVIOUS APPROVED CHAPTERS:
+{json.dumps(approved, ensure_ascii=False)[:12000]}
+
+NEW DRAFT, CHAPTER {chapter_number}:
+{chapter_text[:14000]}
+
+Rules:
+- Track the six established characters; do not invent new identities.
+- Distinguish events that actually occur in the draft from future ideas.
+- New ideas and possible twists are suggestions, not canon.
+- Do not overwrite established facts.
+- Keep each list concise and useful.
+- Return JSON only.
+"""
+
+    try:
+        result, provider = generate_text(prompt)
+        data = extract_json(result)
+
+        if not isinstance(data, dict):
+            raise ValueError("Invalid chapter-memory response.")
+
+        # Store these notes as provisional. /post commits them.
+        pending = {
+            "chapter_number": chapter_number,
+            "chapter_note": str(data.get("chapter_note", "")).strip()[:2500],
+            "character_updates": data.get("character_updates", [])[:12],
+            "new_ideas": data.get("new_ideas", [])[:10],
+            "twists_to_consider": data.get("twists_to_consider", [])[:10],
+            "foreshadowing": data.get("foreshadowing", [])[:10],
+            "continuity_rules": data.get("continuity_rules", [])[:10],
+            "unresolved_threads": data.get("unresolved_threads", [])[:10],
+            "provider": provider,
+        }
+
+        memory["pending_memory_update"] = pending
+        save_memory(session_id, memory)
+
+        logging.info(
+            "Prepared provisional story memory for chapter %s using %s",
+            chapter_number,
+            provider,
+        )
+
+    except Exception:
+        logging.exception(
+            "Could not prepare provisional story memory for chapter %s",
+            chapter_number,
+        )
+
+
+def commit_pending_story_memory(memory, chapter_number):
+    pending = memory.get("pending_memory_update")
+
+    if not isinstance(pending, dict):
+        return memory
+
+    if pending.get("chapter_number") != chapter_number:
+        return memory
+
+    memory.setdefault("chapter_notes", []).append({
+        "chapter_number": chapter_number,
+        "note": pending.get("chapter_note", ""),
+    })
+
+    # Character developments are added to the existing character records.
+    tracker = memory.get("character_tracker", [])
+    updates = pending.get("character_updates", [])
+
+    if isinstance(tracker, list) and isinstance(updates, list):
+        for update in updates:
+            if not isinstance(update, dict):
+                continue
+
+            name = str(update.get("character", "")).strip().casefold()
+            change = str(update.get("change", "")).strip()
+
+            if not name or not change:
+                continue
+
+            for character in tracker:
+                if (
+                    isinstance(character, dict)
+                    and str(character.get("character", "")).strip().casefold() == name
+                ):
+                    character.setdefault("chapter_developments", []).append({
+                        "chapter_number": chapter_number,
+                        "change": change,
+                    })
+                    break
+
+    for source_key, target_key in [
+        ("new_ideas", "brainstormed_ideas"),
+        ("twists_to_consider", "brainstormed_ideas"),
+        ("foreshadowing", "foreshadowing"),
+        ("continuity_rules", "continuity_rules"),
+        ("unresolved_threads", "unresolved_threads"),
+    ]:
+        destination = memory.setdefault(target_key, [])
+        existing = {str(item) for item in destination}
+
+        for item in pending.get(source_key, []):
+            value = str(item).strip()
+            if value and value not in existing:
+                destination.append(value)
+                existing.add(value)
+
+        memory[target_key] = destination[-50:]
+
+    memory["pending_memory_update"] = None
+    return memory
 
 
 # ==================================================
@@ -1161,6 +1538,9 @@ async def novel(interaction: discord.Interaction, board: discord.Attachment):
         response.raise_for_status()
         image_bytes = response.content
 
+        if len(image_bytes) > MAX_IMAGE_SIZE:
+            raise ValueError("The downloaded image exceeds 15 MB.")
+
         mime_type = board.content_type or {
             ".jpg": "image/jpeg",
             ".jpeg": "image/jpeg",
@@ -1169,8 +1549,9 @@ async def novel(interaction: discord.Interaction, board: discord.Attachment):
             ".gif": "image/gif",
         }.get(Path(filename).suffix, "image/jpeg")
 
+        safe_filename = Path(board.filename).name
         board_path = BOARD_FOLDER / (
-            f"{interaction.user.id}_{today_string()}_{board.filename}"
+            f"{interaction.user.id}_{today_string()}_{safe_filename}"
         )
         board_path.write_bytes(image_bytes)
 
@@ -1268,7 +1649,6 @@ async def write(interaction: discord.Interaction):
         )
         return
 
-    # An existing draft is displayed again, not regenerated.
     if session["current_draft"]:
         chapter_number = session["current_draft_chapter"]
 
@@ -1288,7 +1668,7 @@ async def write(interaction: discord.Interaction):
 
     approved = get_approved_chapters(session)
 
-    if len(approved) >= 10:
+    if len(approved) >= MAX_CHAPTERS:
         await interaction.followup.send(
             "🎉 All 10 chapters have already been approved. "
             "Your novel is complete!",
@@ -1301,7 +1681,7 @@ async def write(interaction: discord.Interaction):
     memory = get_memory(session)
 
     prompt = f"""
-You are Yeosang, an experienced novelist and writing partner.
+{CREATIVE_DIRECTIVE}
 
 Write Chapter {chapter_number} of the user's novel.
 
@@ -1309,30 +1689,55 @@ NOVEL TITLE:
 {session["chosen_title"]}
 
 APPROVED STORY PLAN:
-{json.dumps(plan, ensure_ascii=False, indent=2)}
+{json.dumps(plan, ensure_ascii=False, indent=2)[:14000]}
 
 PRIVATE COLLECTION-BOARD ANALYSIS:
-{session["visual_analysis"][:10000]}
+{session["visual_analysis"][:8000]}
 
 USER'S STORY CHOICES:
-{json.dumps(memory.get("user_choices", []), ensure_ascii=False)}
+{json.dumps(memory.get("user_choices", []), ensure_ascii=False)[:8000]}
+
+SAVED CHARACTER TRACKER:
+{json.dumps(memory.get("character_tracker", []), ensure_ascii=False)[:8000]}
+
+SAVED BRAINSTORMED IDEAS:
+{json.dumps(memory.get("brainstormed_ideas", []), ensure_ascii=False)[:5000]}
+
+APPROVED TWISTS:
+{json.dumps(memory.get("approved_twists", []), ensure_ascii=False)[:4000]}
+
+FORESHADOWING:
+{json.dumps(memory.get("foreshadowing", []), ensure_ascii=False)[:4000]}
+
+CONTINUITY RULES:
+{json.dumps(memory.get("continuity_rules", []), ensure_ascii=False)[:5000]}
+
+UNRESOLVED THREADS:
+{json.dumps(memory.get("unresolved_threads", []), ensure_ascii=False)[:5000]}
 
 PREVIOUS APPROVED CHAPTERS:
-{json.dumps(approved, ensure_ascii=False)}
+{json.dumps(approved, ensure_ascii=False)[:18000]}
 
 CHAPTER NUMBER: {chapter_number} of 10
 
-INSTRUCTIONS:
+CHAPTER WRITING REQUIREMENTS:
 - Write only Chapter {chapter_number}.
 - Continue naturally from the previous approved chapter.
-- Chapter 1 should establish the setting, characters, atmosphere,
-  and conflict without rushing.
-- Follow the approved premise, relationships, and ending direction.
-- Maintain character consistency and established facts.
-- Do not contradict previous approved chapters.
-- Do not reveal secrets earlier than planned.
+- Follow the approved premise, relationships, world rules, and ending.
+- Preserve all established facts and character personalities.
+- Give all six established characters meaningful presence across
+  the novel. A character need not appear in every single chapter,
+  but their overall arcs and planned contributions must not disappear.
+- Use the chapter outline to decide who should act and what should change.
+- Check which character has agency in this chapter. Do not let the same
+  characters solve every problem while the others become background.
+- Develop original ideas and interesting turns that fit the approved plan.
+- Plant or develop clues when appropriate. Do not reveal a major secret
+  before its planned payoff.
+- New ideas must not contradict canon or silently override user choices.
+- Advance at least one meaningful plot thread or character arc.
 - Use immersive prose, meaningful dialogue, and developed scenes.
-- Avoid summaries in place of actual scenes.
+- Avoid summaries in place of scenes.
 - Avoid making the entire chapter a sequence of one-line paragraphs.
 - Do not add an out-of-story explanation or ask questions.
 - Return the chapter heading followed by complete chapter prose.
@@ -1347,8 +1752,6 @@ INSTRUCTIONS:
         if not chapter_text:
             raise ValueError("The AI returned an empty chapter.")
 
-        # Save before sending so the generated draft is not lost
-        # if Discord temporarily rejects or fails to deliver a message.
         with connect_db() as db:
             db.execute("""
                 UPDATE story_sessions
@@ -1364,10 +1767,16 @@ INSTRUCTIONS:
                 session["id"],
             ))
 
+        # Generate optional continuity notes. The draft remains saved
+        # even if this secondary AI request fails.
+        update_pending_story_memory(
+            session["id"],
+            chapter_number,
+            chapter_text,
+        )
+
         refreshed = get_session(session["id"])
 
-        # FIX: Send each section in its own message.
-        # Never send embeds=embeds for the whole chapter.
         await send_chapter_messages(
             interaction.followup,
             refreshed,
@@ -1439,7 +1848,7 @@ async def post(interaction: discord.Interaction):
     expected_number = len(approved) + 1
     draft_number = session["current_draft_chapter"]
 
-    if draft_number != expected_number or expected_number > 10:
+    if draft_number != expected_number or expected_number > MAX_CHAPTERS:
         await interaction.followup.send(
             "The draft number does not match the next chapter. "
             "Nothing was approved. Please check the Render logs.",
@@ -1465,7 +1874,10 @@ async def post(interaction: discord.Interaction):
     memory = get_memory(session)
     memory.setdefault("approved_chapters", []).append(chapter_record)
 
-    completed = expected_number == 10
+    # Commit continuity notes only when the user approves the chapter.
+    memory = commit_pending_story_memory(memory, expected_number)
+
+    completed = expected_number == MAX_CHAPTERS
 
     with connect_db() as db:
         current = db.execute("""
@@ -1481,7 +1893,7 @@ async def post(interaction: discord.Interaction):
         ):
             await interaction.followup.send(
                 "The draft changed while you were approving it. "
-                "Nothing was saved. Run `/write` again.",
+                "Nothing was approved. Run `/write` again.",
                 ephemeral=True,
             )
             return
@@ -1507,7 +1919,7 @@ async def post(interaction: discord.Interaction):
             description=(
                 f"**{session['chosen_title']}**\n\n"
                 "Chapter 10 has been approved. All ten official chapters "
-                "are saved in your story memory.\n\n"
+                "and their committed story notes are saved in your memory.\n\n"
                 "Public website publishing will be added separately."
             ),
             color=EMBED_COLOR,
