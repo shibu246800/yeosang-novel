@@ -16,9 +16,9 @@ from flask import Flask
 from ai.manager import AIManager
 
 
-# ==========================================
+# ==================================================
 # CONFIGURATION
-# ==========================================
+# ==================================================
 
 logging.basicConfig(level=logging.INFO)
 
@@ -29,6 +29,7 @@ DATABASE_PATH.parent.mkdir(parents=True, exist_ok=True)
 BOARD_FOLDER.mkdir(parents=True, exist_ok=True)
 
 MAX_IMAGE_SIZE = 15 * 1024 * 1024
+EMBED_COLOR = discord.Color.from_rgb(78, 0, 23)
 
 app = Flask(__name__)
 
@@ -39,14 +40,15 @@ def home():
 
 
 def run_web():
-    port = int(os.environ.get("PORT", 10000))
-    app.run(host="0.0.0.0", port=port)
+    app.run(
+        host="0.0.0.0",
+        port=int(os.environ.get("PORT", 10000)),
+    )
 
 
-# ==========================================
+# ==================================================
 # DISCORD BOT INITIALIZATION
-# IMPORTANT: MUST BE BEFORE COMMANDS
-# ==========================================
+# ==================================================
 
 intents = discord.Intents.default()
 intents.message_content = True
@@ -56,10 +58,12 @@ bot = commands.Bot(
     intents=intents,
 )
 
+ai_manager = AIManager()
 
-# ==========================================
-# DATABASE INITIALIZATION
-# ==========================================
+
+# ==================================================
+# DATABASE
+# ==================================================
 
 def connect_db():
     db = sqlite3.connect(DATABASE_PATH)
@@ -114,6 +118,8 @@ def initialize_database():
             "title_options": "TEXT",
             "chosen_title": "TEXT",
             "plan_status": "TEXT NOT NULL DEFAULT 'developing'",
+            "current_draft": "TEXT",
+            "current_draft_chapter": "INTEGER",
         }
 
         for column, definition in migrations.items():
@@ -127,13 +133,24 @@ def initialize_database():
 initialize_database()
 
 
-# ==========================================
-# SESSION HELPERS
-# ==========================================
+# ==================================================
+# GENERAL HELPERS
+# ==================================================
+
+def now_string():
+    return datetime.utcnow().isoformat()
+
 
 def today_string():
-    # Uses UTC. A configurable local timezone can be added later.
     return datetime.utcnow().date().isoformat()
+
+
+def get_session(session_id):
+    with connect_db() as db:
+        return db.execute(
+            "SELECT * FROM story_sessions WHERE id = ?",
+            (session_id,),
+        ).fetchone()
 
 
 def get_todays_session(user_id):
@@ -145,13 +162,51 @@ def get_todays_session(user_id):
         """, (str(user_id), today_string())).fetchone()
 
 
-def get_session(session_id):
-    with connect_db() as db:
-        return db.execute("""
-            SELECT *
-            FROM story_sessions
-            WHERE id = ?
-        """, (session_id,)).fetchone()
+def unpack_ai_result(result):
+    if isinstance(result, tuple):
+        return (
+            str(result[0]),
+            str(result[1]) if len(result) > 1 else "AI",
+        )
+
+    return str(result), "AI"
+
+
+def generate_text(prompt):
+    return unpack_ai_result(ai_manager.generate_text(prompt))
+
+
+def extract_json(text):
+    text = text.strip()
+
+    if text.startswith("```"):
+        lines = text.splitlines()
+        if lines and lines[0].startswith("```"):
+            lines = lines[1:]
+        if lines and lines[-1].startswith("```"):
+            lines = lines[:-1]
+        text = "\n".join(lines).strip()
+
+    start = text.find("{")
+    end = text.rfind("}")
+
+    if start < 0 or end <= start:
+        raise ValueError("The AI did not return valid JSON.")
+
+    return json.loads(text[start:end + 1])
+
+
+def get_memory(session):
+    try:
+        return json.loads(session["story_memory"] or "{}")
+    except (TypeError, json.JSONDecodeError):
+        return {}
+
+
+def get_approved_chapters(session):
+    memory = get_memory(session)
+    chapters = memory.get("approved_chapters", [])
+    return chapters if isinstance(chapters, list) else []
 
 
 def save_session(
@@ -161,7 +216,7 @@ def save_session(
     mime_type,
     visual_analysis,
 ):
-    now = datetime.utcnow().isoformat()
+    now = now_string()
 
     memory = {
         "collection": {
@@ -175,30 +230,11 @@ def save_session(
     }
 
     with connect_db() as db:
-        existing = db.execute("""
-            SELECT id
-            FROM story_sessions
-            WHERE user_id = ? AND session_date = ?
-        """, (str(user_id), today_string())).fetchone()
-
-        if existing:
-            raise ValueError(
-                "You already have a story session today. "
-                "Your existing session has been preserved."
-            )
-
         cursor = db.execute("""
             INSERT INTO story_sessions (
-                user_id,
-                session_date,
-                board_path,
-                board_filename,
-                mime_type,
-                visual_analysis,
-                story_memory,
-                status,
-                created_at,
-                updated_at
+                user_id, session_date, board_path,
+                board_filename, mime_type, visual_analysis,
+                story_memory, status, created_at, updated_at
             )
             VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
         """, (
@@ -227,10 +263,7 @@ def get_answers(session_id):
         """, (session_id,)).fetchall()
 
     return [
-        {
-            "question": row["question"],
-            "answer": row["answer"],
-        }
+        {"question": row["question"], "answer": row["answer"]}
         for row in rows
     ]
 
@@ -246,7 +279,7 @@ def save_answer(session_id, question, answer):
         if not row:
             raise ValueError("Story session not found.")
 
-        memory = json.loads(row["story_memory"])
+        memory = json.loads(row["story_memory"] or "{}")
         memory.setdefault("user_choices", []).append({
             "question": question,
             "answer": answer,
@@ -254,18 +287,10 @@ def save_answer(session_id, question, answer):
 
         db.execute("""
             INSERT INTO story_answers (
-                session_id,
-                question,
-                answer,
-                created_at
+                session_id, question, answer, created_at
             )
             VALUES (?, ?, ?, ?)
-        """, (
-            session_id,
-            question,
-            answer,
-            datetime.utcnow().isoformat(),
-        ))
+        """, (session_id, question, answer, now_string()))
 
         db.execute("""
             UPDATE story_sessions
@@ -276,77 +301,35 @@ def save_answer(session_id, question, answer):
             WHERE id = ?
         """, (
             json.dumps(memory, ensure_ascii=False),
-            datetime.utcnow().isoformat(),
+            now_string(),
             session_id,
         ))
 
 
-# ==========================================
-# AI SYSTEM
-# ==========================================
-
-ai_manager = AIManager()
+# ==================================================
+# PRIVATE BOARD ANALYSIS
+# ==================================================
 
 VISUAL_ANALYSIS_PROMPT = """
 You are the private visual-analysis system of Yeosang Novel.
 
-Carefully inspect the uploaded collection board.
+Inspect the collection board carefully.
 
-Describe visible characters, their appearances, clothing,
-expressions, objects, symbols, backgrounds, atmosphere,
-and possible relationship dynamics.
+Describe visible characters, appearance, clothing, expressions,
+objects, symbols, backgrounds, atmosphere, and possible dynamics.
 
 Separate direct visual observations from interpretations.
-Do not invent character names or unsupported facts.
-Do not assume fandom canon.
-Do not write a story.
-Do not display story ideas to the user.
+Do not invent names or unsupported facts.
+Do not assume that a visual interpretation is confirmed canon.
+Do not write a story or expose this analysis directly to the user.
 
-This analysis will be stored privately and used to help
-the user develop an original novel.
+This analysis is private and will help develop the novel.
 """
 
 
-def unpack_ai_result(result):
-    if isinstance(result, tuple):
-        text_result = result[0]
-        provider = result[1] if len(result) > 1 else "AI"
-        return str(text_result), str(provider)
-
-    return str(result), "AI"
-
-
-def generate_text(prompt):
-    result = ai_manager.generate_text(prompt)
-    return unpack_ai_result(result)
-
-
-def extract_json(text):
-    text = text.strip()
-
-    if text.startswith("```"):
-        lines = text.splitlines()
-
-        if lines and lines[0].startswith("```"):
-            lines = lines[1:]
-
-        if lines and lines[-1].startswith("```"):
-            lines = lines[:-1]
-
-        text = "\n".join(lines).strip()
-
-    start = text.find("{")
-    end = text.rfind("}")
-
-    if start == -1 or end <= start:
-        raise ValueError("The AI did not return valid JSON.")
-
-    return json.loads(text[start:end + 1])
-
-
-# ==========================================
-# ADAPTIVE STORY READINESS SYSTEM
-# ==========================================
+# ==================================================
+# ADAPTIVE STORY DEVELOPMENT
+# ==================================================
 
 def evaluate_story(session_id):
     session = get_session(session_id)
@@ -354,77 +337,58 @@ def evaluate_story(session_id):
     if not session:
         raise ValueError("Story session not found.")
 
-    answers = get_answers(session_id)
-
     prompt = f"""
-You are Yeosang, an adaptive novel-writing companion.
+You are Yeosang, a thoughtful novel-writing companion.
 
-Help the user develop an original ten-chapter novel based
-on a collection board and their own creative choices.
+Help the user develop an original novel based on their collection
+board and their answers.
 
-After every answer, decide whether to ask another question
-or prepare the final story plan.
+Ask only one question at a time. After each answer, decide whether
+important story information is still missing or the story is ready.
 
-Do not use a fixed question count.
-Ask only when important story information is missing.
-A detailed answer may resolve several decisions at once.
-Do not ask the user to decide every minor detail.
-Use your creative judgment for details they leave open.
+Do not use a fixed question count. Use creative judgment for details
+the user leaves open. Respect the user's choices.
 
-Respect the user's choices. Visual interpretations are
-inspiration, not confirmed story facts.
-
-VISUAL ANALYSIS:
+PRIVATE VISUAL ANALYSIS:
 {session["visual_analysis"][:12000]}
 
 USER ANSWERS:
-{json.dumps(answers, ensure_ascii=False)}
+{json.dumps(get_answers(session_id), ensure_ascii=False)}
 
-Return exactly one of these JSON formats.
+Return valid JSON only.
 
-WHEN MORE INFORMATION IS NEEDED:
+If more information is needed:
 {{
   "status": "ask",
-  "question": "One natural, useful question",
+  "question": "One useful question",
   "options": [
-    {{"label": "Short choice", "value": "Meaning of choice"}},
-    {{"label": "Short choice", "value": "Meaning of choice"}},
-    {{"label": "Short choice", "value": "Meaning of choice"}},
+    {{"label": "Choice A", "value": "Meaning of choice A"}},
+    {{"label": "Choice B", "value": "Meaning of choice B"}},
+    {{"label": "Choice C", "value": "Meaning of choice C"}},
     {{"label": "Something else", "value": "Let me choose another direction"}}
   ]
 }}
 
-WHEN THE STORY IS READY:
+If ready:
 {{
   "status": "ready",
   "plan": {{
-    "premise": "The central story premise",
-    "characters": "Main characters and their roles",
+    "premise": "Central premise",
+    "characters": "Main characters and roles",
     "relationship": "Important relationships",
-    "setting": "Where and when the story takes place",
-    "conflict": "The central problem and stakes",
-    "major_secret": "A secret or mystery, if appropriate",
-    "ending": "The intended ending and emotional tone",
-    "chapter_arc": "How the story develops across ten chapters"
+    "setting": "Setting",
+    "conflict": "Central conflict",
+    "major_secret": "Secret or mystery, if appropriate",
+    "ending": "Ending direction",
+    "chapter_arc": "A coherent ten-chapter outline"
   }},
-  "titles": [
-    "Title option one",
-    "Title option two",
-    "Title option three",
-    "Title option four"
-  ]
+  "titles": ["Title one", "Title two", "Title three", "Title four"]
 }}
 
-READINESS RULES:
-- The central premise must be understandable.
-- The main characters and important dynamics must be clear.
-- There must be a workable central conflict.
-- The intended ending direction should be clear enough.
-- Do not force unnecessary details into the story.
-- Ask one question only, never a questionnaire.
-- If ready, create a coherent ten-chapter story plan.
-- Suggest four distinct titles that suit the story.
-- Return valid JSON only, without Markdown.
+The story plan must support exactly ten chapters.
+Do not force unnecessary details.
+Return four distinct titles when possible.
+Do not include Markdown outside the JSON.
 """
 
     result, provider = generate_text(prompt)
@@ -434,11 +398,7 @@ READINESS RULES:
         question = str(data.get("question", "")).strip()
         options = data.get("options", [])
 
-        if not question or not isinstance(options, list):
-            raise ValueError("The AI returned an incomplete question.")
-
         clean_options = []
-
         for option in options[:5]:
             if not isinstance(option, dict):
                 continue
@@ -452,8 +412,8 @@ READINESS RULES:
                     "value": value[:500],
                 })
 
-        if not clean_options:
-            raise ValueError("The AI returned no usable choices.")
+        if not question or not clean_options:
+            raise ValueError("The AI returned an incomplete question.")
 
         return {
             "status": "ask",
@@ -466,24 +426,17 @@ READINESS RULES:
         plan = data.get("plan")
         titles = data.get("titles", [])
 
-        required_fields = [
-            "premise",
-            "characters",
-            "relationship",
-            "setting",
-            "conflict",
-            "ending",
-            "chapter_arc",
+        required = [
+            "premise", "characters", "relationship",
+            "setting", "conflict", "ending", "chapter_arc",
         ]
 
         if not isinstance(plan, dict):
-            raise ValueError("The AI returned an incomplete story plan.")
+            raise ValueError("The AI returned an incomplete plan.")
 
-        for field in required_fields:
-            if not str(plan.get(field, "")).strip():
-                raise ValueError(
-                    f"The story plan is missing: {field}"
-                )
+        for key in required:
+            if not str(plan.get(key, "")).strip():
+                raise ValueError(f"Missing story-plan field: {key}")
 
         if not isinstance(titles, list):
             titles = []
@@ -504,7 +457,7 @@ READINESS RULES:
             "provider": provider,
         }
 
-    raise ValueError("The AI returned an unknown readiness status.")
+    raise ValueError("Unknown AI readiness status.")
 
 
 def save_question(session_id, question, options):
@@ -520,7 +473,7 @@ def save_question(session_id, question, options):
         """, (
             question,
             json.dumps(options, ensure_ascii=False),
-            datetime.utcnow().isoformat(),
+            now_string(),
             session_id,
         ))
 
@@ -536,7 +489,7 @@ def save_plan(session_id, plan, titles):
         if not row:
             raise ValueError("Story session not found.")
 
-        memory = json.loads(row["story_memory"])
+        memory = json.loads(row["story_memory"] or "{}")
         memory["story_plan"] = plan
 
         db.execute("""
@@ -554,14 +507,14 @@ def save_plan(session_id, plan, titles):
             json.dumps(plan, ensure_ascii=False),
             json.dumps(titles, ensure_ascii=False),
             json.dumps(memory, ensure_ascii=False),
-            datetime.utcnow().isoformat(),
+            now_string(),
             session_id,
         ))
 
 
-# ==========================================
+# ==================================================
 # STORY PLAN EMBED
-# ==========================================
+# ==================================================
 
 def build_plan_embed(session_id):
     session = get_session(session_id)
@@ -573,11 +526,8 @@ def build_plan_embed(session_id):
 
     embed = discord.Embed(
         title="Your Story Plan",
-        description=(
-            "Yeosang has enough information to prepare your story.\n"
-            "Review the plan before writing begins."
-        ),
-        color=discord.Color.from_rgb(78, 0, 23),
+        description="Review your story before approving it.",
+        color=EMBED_COLOR,
     )
 
     fields = [
@@ -593,7 +543,6 @@ def build_plan_embed(session_id):
 
     for label, key in fields:
         value = str(plan.get(key, "")).strip()
-
         if value:
             embed.add_field(
                 name=label,
@@ -601,16 +550,13 @@ def build_plan_embed(session_id):
                 inline=False,
             )
 
-    embed.set_footer(
-        text="Review the plan • Approve it or request changes"
-    )
-
+    embed.set_footer(text="Approve the plan or request changes.")
     return embed
 
 
-# ==========================================
-# QUESTION SELECT MENU
-# ==========================================
+# ==================================================
+# STORY QUESTION UI
+# ==================================================
 
 class StoryQuestionSelect(discord.ui.Select):
     def __init__(self, session_id, question, options):
@@ -634,15 +580,12 @@ class StoryQuestionSelect(discord.ui.Select):
             options=menu_options,
         )
 
-    async def callback(self, interaction: discord.Interaction):
+    async def callback(self, interaction):
         session = get_session(self.session_id)
 
-        if (
-            not session
-            or session["user_id"] != str(interaction.user.id)
-        ):
+        if not session or session["user_id"] != str(interaction.user.id):
             await interaction.response.send_message(
-                "This story session belongs to another writer.",
+                "This story belongs to another writer.",
                 ephemeral=True,
             )
             return
@@ -655,7 +598,6 @@ class StoryQuestionSelect(discord.ui.Select):
             return
 
         selected = self.option_values[int(self.values[0])]
-
         await interaction.response.defer()
 
         try:
@@ -680,11 +622,7 @@ class StoryQuestionSelect(discord.ui.Select):
                         f"**Your choice:** {selected['label']}\n\n"
                         f"**{decision['question']}**"
                     ),
-                    color=discord.Color.from_rgb(78, 0, 23),
-                )
-
-                embed.set_footer(
-                    text="One question at a time • Your story, your choices"
+                    color=EMBED_COLOR,
                 )
 
                 await interaction.edit_original_response(
@@ -712,10 +650,9 @@ class StoryQuestionSelect(discord.ui.Select):
 
         except Exception:
             logging.exception("Failed to process story answer")
-
             await interaction.followup.send(
-                "Your answer may have been saved, but I couldn't "
-                "prepare the next step. Please check the Render logs.",
+                "I couldn't prepare the next step. "
+                "Please check the Render logs.",
                 ephemeral=True,
             )
 
@@ -723,48 +660,35 @@ class StoryQuestionSelect(discord.ui.Select):
 class StoryQuestionView(discord.ui.View):
     def __init__(self, session_id, question, options):
         super().__init__(timeout=86400)
-
         self.add_item(
-            StoryQuestionSelect(
-                session_id,
-                question,
-                options,
-            )
+            StoryQuestionSelect(session_id, question, options)
         )
 
 
-# ==========================================
-# STORY PLAN REVISION MODAL
-# ==========================================
+# ==================================================
+# STORY PLAN REVISION
+# ==================================================
 
 class StoryRevisionModal(discord.ui.Modal):
     def __init__(self, session_id):
         super().__init__(title="Revise Your Story Plan")
-
         self.session_id = session_id
 
         self.revision = discord.ui.TextInput(
             label="What would you like to change?",
-            placeholder=(
-                "For example: change the setting, make the "
-                "relationship darker, or add a betrayal."
-            ),
+            placeholder="Describe the changes you want...",
             style=discord.TextStyle.paragraph,
             max_length=1500,
             required=True,
         )
-
         self.add_item(self.revision)
 
-    async def on_submit(self, interaction: discord.Interaction):
+    async def on_submit(self, interaction):
         session = get_session(self.session_id)
 
-        if (
-            not session
-            or session["user_id"] != str(interaction.user.id)
-        ):
+        if not session or session["user_id"] != str(interaction.user.id):
             await interaction.response.send_message(
-                "This story session belongs to another writer.",
+                "This story belongs to another writer.",
                 ephemeral=True,
             )
             return
@@ -774,7 +698,7 @@ class StoryRevisionModal(discord.ui.Modal):
         try:
             save_answer(
                 self.session_id,
-                "Requested changes to the story plan",
+                "Requested story-plan changes",
                 self.revision.value,
             )
 
@@ -787,25 +711,15 @@ class StoryRevisionModal(discord.ui.Modal):
                     decision["options"],
                 )
 
-                embed = discord.Embed(
-                    title="Let's Refine the Story",
-                    description=(
-                        "I'll clarify one detail before preparing "
-                        "the revised plan.\n\n"
-                        f"**{decision['question']}**"
-                    ),
-                    color=discord.Color.from_rgb(78, 0, 23),
-                )
-
                 await interaction.followup.send(
-                    embed=embed,
+                    f"**One quick clarification:**\n"
+                    f"{decision['question']}",
                     view=StoryQuestionView(
                         self.session_id,
                         decision["question"],
                         decision["options"],
                     ),
                 )
-
             else:
                 save_plan(
                     self.session_id,
@@ -821,17 +735,11 @@ class StoryRevisionModal(discord.ui.Modal):
 
         except Exception:
             logging.exception("Failed to revise story plan")
-
             await interaction.followup.send(
-                "I couldn't revise the plan right now. "
-                "Please check the Render logs.",
+                "I couldn't revise the plan. Please check the Render logs.",
                 ephemeral=True,
             )
 
-
-# ==========================================
-# STORY PLAN APPROVAL
-# ==========================================
 
 class StoryPlanView(discord.ui.View):
     def __init__(self, session_id):
@@ -841,12 +749,9 @@ class StoryPlanView(discord.ui.View):
     async def interaction_check(self, interaction):
         session = get_session(self.session_id)
 
-        if (
-            not session
-            or session["user_id"] != str(interaction.user.id)
-        ):
+        if not session or session["user_id"] != str(interaction.user.id):
             await interaction.response.send_message(
-                "Only the writer who started this story can approve it.",
+                "Only the writer can approve this plan.",
                 ephemeral=True,
             )
             return False
@@ -869,7 +774,6 @@ class StoryPlanView(discord.ui.View):
             return
 
         titles = json.loads(session["title_options"] or "[]")
-
         if not titles:
             titles = ["A Story Yet to Be Named"]
 
@@ -880,18 +784,15 @@ class StoryPlanView(discord.ui.View):
                     status = 'title_selection',
                     updated_at = ?
                 WHERE id = ?
-            """, (
-                datetime.utcnow().isoformat(),
-                self.session_id,
-            ))
+            """, (now_string(), self.session_id))
 
         embed = discord.Embed(
             title="Choose Your Novel's Title",
             description="\n".join(
-                f"**{index + 1}.** {title}"
-                for index, title in enumerate(titles)
+                f"**{i + 1}.** {title}"
+                for i, title in enumerate(titles)
             ),
-            color=discord.Color.from_rgb(78, 0, 23),
+            color=EMBED_COLOR,
         )
 
         await interaction.response.send_message(
@@ -899,7 +800,6 @@ class StoryPlanView(discord.ui.View):
             embed=embed,
             view=StoryTitleView(self.session_id, titles),
         )
-
         self.stop()
 
     @discord.ui.button(
@@ -913,10 +813,6 @@ class StoryPlanView(discord.ui.View):
         )
 
 
-# ==========================================
-# TITLE SELECTION
-# ==========================================
-
 class StoryTitleSelect(discord.ui.Select):
     def __init__(self, session_id, titles):
         self.session_id = session_id
@@ -925,34 +821,31 @@ class StoryTitleSelect(discord.ui.Select):
         options = [
             discord.SelectOption(
                 label=title[:100],
-                value=str(index),
+                value=str(i),
             )
-            for index, title in enumerate(titles[:25])
+            for i, title in enumerate(titles[:25])
         ]
 
         super().__init__(
-            placeholder="Choose the title of your novel...",
+            placeholder="Choose your novel's title...",
             min_values=1,
             max_values=1,
             options=options,
         )
 
-    async def callback(self, interaction: discord.Interaction):
+    async def callback(self, interaction):
         session = get_session(self.session_id)
 
-        if (
-            not session
-            or session["user_id"] != str(interaction.user.id)
-        ):
+        if not session or session["user_id"] != str(interaction.user.id):
             await interaction.response.send_message(
-                "This story session belongs to another writer.",
+                "This story belongs to another writer.",
                 ephemeral=True,
             )
             return
 
         if session["plan_status"] != "approved":
             await interaction.response.send_message(
-                "Approve the story plan before choosing a title.",
+                "Approve the story plan first.",
                 ephemeral=True,
             )
             return
@@ -962,11 +855,10 @@ class StoryTitleSelect(discord.ui.Select):
         with connect_db() as db:
             row = db.execute("""
                 SELECT story_memory
-                FROM story_sessions
-                WHERE id = ?
+                FROM story_sessions WHERE id = ?
             """, (self.session_id,)).fetchone()
 
-            memory = json.loads(row["story_memory"])
+            memory = json.loads(row["story_memory"] or "{}")
             memory["title"] = title
 
             db.execute("""
@@ -979,7 +871,7 @@ class StoryTitleSelect(discord.ui.Select):
             """, (
                 title,
                 json.dumps(memory, ensure_ascii=False),
-                datetime.utcnow().isoformat(),
+                now_string(),
                 self.session_id,
             ))
 
@@ -987,10 +879,10 @@ class StoryTitleSelect(discord.ui.Select):
             title="Your Novel Is Ready",
             description=(
                 f"**{title}**\n\n"
-                "Your story plan and title have been saved.\n\n"
-                "The next step is Chapter 1 using `/write`."
+                "Your plan and title are saved.\n"
+                "Use `/write` to generate Chapter 1."
             ),
-            color=discord.Color.from_rgb(78, 0, 23),
+            color=EMBED_COLOR,
         )
 
         await interaction.response.edit_message(
@@ -1003,27 +895,199 @@ class StoryTitleSelect(discord.ui.Select):
 class StoryTitleView(discord.ui.View):
     def __init__(self, session_id, titles):
         super().__init__(timeout=86400)
+        self.add_item(StoryTitleSelect(session_id, titles))
 
-        self.add_item(
-            StoryTitleSelect(session_id, titles)
+
+# ==================================================
+# CHAPTER DISPLAY HELPERS
+# ==================================================
+
+def split_chapter_text(text, limit=3800):
+    text = text.strip()
+    chunks = []
+
+    while len(text) > limit:
+        split_at = text.rfind("\n", 0, limit)
+
+        if split_at < limit // 2:
+            split_at = text.rfind(" ", 0, limit)
+
+        if split_at < limit // 2:
+            split_at = limit
+
+        chunks.append(text[:split_at].strip())
+        text = text[split_at:].strip()
+
+    if text:
+        chunks.append(text)
+
+    return chunks or ["The chapter draft is empty."]
+
+
+def chapter_embeds(session, chapter_number, chapter_text, draft=True):
+    title = session["chosen_title"] or "Untitled Novel"
+    heading = f"Chapter {chapter_number}"
+
+    chunks = split_chapter_text(chapter_text)
+
+    # Discord permits up to 10 embeds per message.
+    # Keep a chapter within that limit.
+    if len(chunks) > 10:
+        chunks = chunks[:10]
+        chunks[-1] = (
+            chunks[-1][:3500]
+            + "\n\n[Draft shortened to fit Discord's display limit.]"
+        )
+
+    embeds = []
+
+    for index, chunk in enumerate(chunks):
+        embed = discord.Embed(
+            title=f"{title} | {heading}" if index == 0 else heading,
+            description=chunk,
+            color=EMBED_COLOR,
+        )
+
+        if index == 0:
+            embed.set_author(name="Yeosang Novel")
+            embed.set_footer(
+                text=(
+                    "Draft • Review and edit before /post"
+                    if draft
+                    else "Official chapter"
+                )
+            )
+        else:
+            embed.set_footer(
+                text=f"{heading} • Part {index + 1}"
+            )
+
+        embeds.append(embed)
+
+    return embeds
+
+
+# ==================================================
+# CHAPTER EDITING
+# ==================================================
+
+class ChapterEditModal(discord.ui.Modal):
+    def __init__(self, session_id):
+        super().__init__(title="Edit Chapter Draft")
+        self.session_id = session_id
+
+        session = get_session(session_id)
+        draft = session["current_draft"] if session else ""
+
+        self.edited_text = discord.ui.TextInput(
+            label="Revised chapter text",
+            style=discord.TextStyle.paragraph,
+            default=(draft or "")[:4000],
+            max_length=4000,
+            required=True,
+        )
+
+        self.add_item(self.edited_text)
+
+    async def on_submit(self, interaction):
+        session = get_session(self.session_id)
+
+        if not session or session["user_id"] != str(interaction.user.id):
+            await interaction.response.send_message(
+                "Only the writer can edit this chapter.",
+                ephemeral=True,
+            )
+            return
+
+        if not session["current_draft"]:
+            await interaction.response.send_message(
+                "There is no draft waiting for edits.",
+                ephemeral=True,
+            )
+            return
+
+        if len(session["current_draft"]) > 4000:
+            await interaction.response.send_message(
+                "This chapter is too long to edit in one Discord modal. "
+                "You can still approve it with `/post`.",
+                ephemeral=True,
+            )
+            return
+
+        with connect_db() as db:
+            db.execute("""
+                UPDATE story_sessions
+                SET current_draft = ?,
+                    updated_at = ?
+                WHERE id = ?
+            """, (
+                self.edited_text.value,
+                now_string(),
+                self.session_id,
+            ))
+
+        await interaction.response.send_message(
+            "🖤 Your revised draft has been saved. "
+            "Use `/post` when you're ready to approve it.",
+            ephemeral=True,
         )
 
 
-# ==========================================
-# /novel COMMAND
-# ==========================================
+class ChapterDraftView(discord.ui.View):
+    def __init__(self, session_id):
+        super().__init__(timeout=86400)
+        self.session_id = session_id
+
+    async def interaction_check(self, interaction):
+        session = get_session(self.session_id)
+
+        if not session or session["user_id"] != str(interaction.user.id):
+            await interaction.response.send_message(
+                "Only the writer can manage this draft.",
+                ephemeral=True,
+            )
+            return False
+
+        return True
+
+    @discord.ui.button(
+        label="Edit Draft",
+        style=discord.ButtonStyle.secondary,
+        emoji="✏️",
+    )
+    async def edit_draft(self, interaction, button):
+        session = get_session(self.session_id)
+
+        if not session or not session["current_draft"]:
+            await interaction.response.send_message(
+                "There is no active chapter draft.",
+                ephemeral=True,
+            )
+            return
+
+        if len(session["current_draft"]) > 4000:
+            await interaction.response.send_message(
+                "This chapter exceeds Discord's 4,000-character modal "
+                "limit. You can still review it and use `/post`.",
+                ephemeral=True,
+            )
+            return
+
+        await interaction.response.send_modal(
+            ChapterEditModal(self.session_id)
+        )
+
+
+# ==================================================
+# /NOVEL
+# ==================================================
 
 @bot.tree.command(
     name="novel",
-    description="Start today's story using a collection board.",
+    description="Start today's novel using a collection board.",
 )
-@app_commands.describe(
-    board="Upload the collection board for today's story.",
-)
-async def novel(
-    interaction: discord.Interaction,
-    board: discord.Attachment,
-):
+@app_commands.describe(board="Upload today's collection board.")
+async def novel(interaction: discord.Interaction, board: discord.Attachment):
     await interaction.response.defer(thinking=True)
 
     if get_todays_session(interaction.user.id):
@@ -1035,21 +1099,11 @@ async def novel(
         return
 
     filename = board.filename.lower()
-
-    allowed_extensions = (
-        ".png",
-        ".jpg",
-        ".jpeg",
-        ".webp",
-        ".gif",
-    )
+    extensions = (".png", ".jpg", ".jpeg", ".webp", ".gif")
 
     is_image = (
-        (
-            board.content_type
-            and board.content_type.startswith("image/")
-        )
-        or filename.endswith(allowed_extensions)
+        bool(board.content_type and board.content_type.startswith("image/"))
+        or filename.endswith(extensions)
     )
 
     if not is_image:
@@ -1071,28 +1125,17 @@ async def novel(
         response.raise_for_status()
         image_bytes = response.content
 
-    except requests.RequestException:
-        logging.exception("Failed to download collection board")
+        mime_type = board.content_type or {
+            ".jpg": "image/jpeg",
+            ".jpeg": "image/jpeg",
+            ".png": "image/png",
+            ".webp": "image/webp",
+            ".gif": "image/gif",
+        }.get(Path(filename).suffix, "image/jpeg")
 
-        await interaction.followup.send(
-            "I couldn't retrieve the uploaded image. Please try again.",
-            ephemeral=True,
+        board_path = BOARD_FOLDER / (
+            f"{interaction.user.id}_{today_string()}_{board.filename}"
         )
-        return
-
-    mime_type = board.content_type or {
-        ".jpg": "image/jpeg",
-        ".jpeg": "image/jpeg",
-        ".png": "image/png",
-        ".webp": "image/webp",
-        ".gif": "image/gif",
-    }.get(Path(filename).suffix, "image/jpeg")
-
-    board_path = BOARD_FOLDER / (
-        f"{interaction.user.id}_{today_string()}_{board.filename}"
-    )
-
-    try:
         board_path.write_bytes(image_bytes)
 
         analysis_result = ai_manager.analyze_image(
@@ -1100,17 +1143,14 @@ async def novel(
             mime_type=mime_type,
             prompt=VISUAL_ANALYSIS_PROMPT,
         )
-
-        visual_analysis, vision_provider = unpack_ai_result(
-            analysis_result
-        )
+        visual_analysis, provider = unpack_ai_result(analysis_result)
 
         session_id = save_session(
-            user_id=interaction.user.id,
-            board_path=board_path,
-            board_filename=board.filename,
-            mime_type=mime_type,
-            visual_analysis=visual_analysis,
+            interaction.user.id,
+            board_path,
+            board.filename,
+            mime_type,
+            visual_analysis,
         )
 
         decision = evaluate_story(session_id)
@@ -1125,62 +1165,372 @@ async def novel(
             embed = discord.Embed(
                 title="Yeosang's Story Room",
                 description=(
-                    "Your collection has been saved for today's story.\n\n"
-                    f"**{decision['question']}**\n\n"
-                    "Choose an option below. Your answer will shape "
-                    "the next question."
+                    "Your collection board is saved for today's story.\n\n"
+                    f"**{decision['question']}**"
                 ),
-                color=discord.Color.from_rgb(78, 0, 23),
+                color=EMBED_COLOR,
             )
-
             embed.set_thumbnail(url=board.url)
-            embed.set_footer(
-                text="Your story • Your choices • One question at a time"
-            )
-
-            view = StoryQuestionView(
-                session_id,
-                decision["question"],
-                decision["options"],
-            )
+            embed.set_footer(text="One question at a time • Your story")
 
             await interaction.followup.send(
                 embed=embed,
-                view=view,
+                view=StoryQuestionView(
+                    session_id,
+                    decision["question"],
+                    decision["options"],
+                ),
             )
-
         else:
-            save_plan(
-                session_id,
-                decision["plan"],
-                decision["titles"],
-            )
+            save_plan(session_id, decision["plan"], decision["titles"])
 
             await interaction.followup.send(
-                "🖤 **Yeosang has enough information to begin.**",
+                "🖤 **Yeosang has enough information to prepare your plan.**",
                 embed=build_plan_embed(session_id),
                 view=StoryPlanView(session_id),
             )
 
         logging.info(
-            "Session %s started. Vision provider: %s",
+            "Story session %s created using %s",
             session_id,
-            vision_provider,
+            provider,
         )
 
     except Exception:
-        logging.exception("Failed to initialize story session")
-
+        logging.exception("Failed to start novel session")
         await interaction.followup.send(
             "I couldn't prepare the story session. "
-            "Please check the Render logs for the error.",
+            "Please check the Render logs.",
             ephemeral=True,
         )
 
 
-# ==========================================
-# START BOT AND WEB SERVER
-# ==========================================
+# ==================================================
+# /WRITE
+# Generates exactly one unapproved chapter at a time.
+# ==================================================
+
+@bot.tree.command(
+    name="write",
+    description="Generate the next chapter of your approved novel.",
+)
+async def write(interaction: discord.Interaction):
+    await interaction.response.defer(thinking=True)
+
+    session = get_todays_session(interaction.user.id)
+
+    if not session:
+        await interaction.followup.send(
+            "Start today's story first with `/novel`.",
+            ephemeral=True,
+        )
+        return
+
+    if session["plan_status"] != "approved":
+        await interaction.followup.send(
+            "Approve your story plan and choose a title before using `/write`.",
+            ephemeral=True,
+        )
+        return
+
+    if not session["chosen_title"]:
+        await interaction.followup.send(
+            "Choose your novel's title before writing chapters.",
+            ephemeral=True,
+        )
+        return
+
+    if session["current_draft"]:
+        chapter_number = session["current_draft_chapter"]
+        embeds = chapter_embeds(
+            session,
+            chapter_number,
+            session["current_draft"],
+            draft=True,
+        )
+
+        await interaction.followup.send(
+            content=(
+                f"Your Chapter {chapter_number} draft is still waiting "
+                "for approval. Review it below, edit it if needed, "
+                "then use `/post`."
+            ),
+            embeds=embeds,
+            view=ChapterDraftView(session["id"]),
+        )
+        return
+
+    approved = get_approved_chapters(session)
+
+    if len(approved) >= 10:
+        await interaction.followup.send(
+            "🎉 All 10 chapters have already been approved. "
+            "Your novel is complete!",
+            ephemeral=True,
+        )
+        return
+
+    chapter_number = len(approved) + 1
+    plan = json.loads(session["story_plan"] or "{}")
+    memory = get_memory(session)
+
+    prompt = f"""
+You are Yeosang, an experienced novelist and writing partner.
+
+Write Chapter {chapter_number} of the user's novel.
+
+NOVEL TITLE:
+{session["chosen_title"]}
+
+APPROVED STORY PLAN:
+{json.dumps(plan, ensure_ascii=False, indent=2)}
+
+PRIVATE COLLECTION-BOARD ANALYSIS:
+{session["visual_analysis"][:10000]}
+
+USER'S STORY CHOICES:
+{json.dumps(memory.get("user_choices", []), ensure_ascii=False)}
+
+PREVIOUS APPROVED CHAPTERS:
+{json.dumps(approved, ensure_ascii=False)}
+
+CHAPTER NUMBER:
+{chapter_number} of 10
+
+INSTRUCTIONS:
+- Write only Chapter {chapter_number}, not multiple chapters.
+- Continue naturally from the previous approved chapter.
+- For Chapter 1, establish the setting, characters, atmosphere,
+  and central narrative without rushing.
+- Follow the approved premise, relationships, conflict, and ending.
+- Maintain consistent character personalities and established facts.
+- Do not contradict previous approved chapters.
+- Do not reveal secrets earlier than the story plan intends.
+- Use immersive prose, meaningful dialogue, and developed scenes.
+- Avoid summaries in place of actual scenes.
+- Avoid one-line prose paragraphs throughout the chapter.
+- Do not add an out-of-story explanation or ask the user questions.
+- Do not write the next chapter.
+- Return the chapter title followed by the complete chapter prose.
+- Aim for a substantial chapter with a natural beginning and ending.
+- The chapter should feel like part of one continuous novel.
+"""
+
+    try:
+        chapter_text, provider = generate_text(prompt)
+        chapter_text = chapter_text.strip()
+
+        if not chapter_text:
+            raise ValueError("The AI returned an empty chapter.")
+
+        # Save the draft before displaying it, so a failed Discord
+        # response does not lose the generated text.
+        with connect_db() as db:
+            db.execute("""
+                UPDATE story_sessions
+                SET current_draft = ?,
+                    current_draft_chapter = ?,
+                    status = 'chapter_draft',
+                    updated_at = ?
+                WHERE id = ?
+            """, (
+                chapter_text,
+                chapter_number,
+                now_string(),
+                session["id"],
+            ))
+
+        refreshed = get_session(session["id"])
+        embeds = chapter_embeds(
+            refreshed,
+            chapter_number,
+            chapter_text,
+            draft=True,
+        )
+
+        await interaction.followup.send(
+            content=(
+                f"📖 **Chapter {chapter_number} draft is ready.**\n"
+                "Review it before approving. Use the Edit Draft button "
+                "for short edits, or `/post` when you're satisfied."
+            ),
+            embeds=embeds,
+            view=ChapterDraftView(session["id"]),
+        )
+
+        logging.info(
+            "Generated Chapter %s for session %s using %s",
+            chapter_number,
+            session["id"],
+            provider,
+        )
+
+    except Exception:
+        logging.exception("Failed to generate chapter")
+        await interaction.followup.send(
+            "I couldn't generate the chapter. Your existing approved "
+            "chapters have not been changed. Please check the Render logs.",
+            ephemeral=True,
+        )
+
+
+# ==================================================
+# /POST
+# Approves and saves the current draft as official.
+# ==================================================
+
+@bot.tree.command(
+    name="post",
+    description="Approve and save your current chapter.",
+)
+async def post(interaction: discord.Interaction):
+    await interaction.response.defer(thinking=True, ephemeral=True)
+
+    session = get_todays_session(interaction.user.id)
+
+    if not session:
+        await interaction.followup.send(
+            "There is no story session for today. Start with `/novel`.",
+            ephemeral=True,
+        )
+        return
+
+    if not session["current_draft"]:
+        await interaction.followup.send(
+            "There is no chapter draft waiting for approval. "
+            "Use `/write` to generate the next chapter.",
+            ephemeral=True,
+        )
+        return
+
+    if session["plan_status"] != "approved" or not session["chosen_title"]:
+        await interaction.followup.send(
+            "Approve your story plan and choose a title first.",
+            ephemeral=True,
+        )
+        return
+
+    approved = get_approved_chapters(session)
+    expected_number = len(approved) + 1
+    draft_number = session["current_draft_chapter"]
+
+    if draft_number != expected_number:
+        await interaction.followup.send(
+            "The draft number doesn't match the next chapter. "
+            "Nothing was posted. Please check the Render logs.",
+            ephemeral=True,
+        )
+        return
+
+    if expected_number > 10:
+        await interaction.followup.send(
+            "All 10 chapters are already approved.",
+            ephemeral=True,
+        )
+        return
+
+    chapter_text = session["current_draft"].strip()
+
+    if not chapter_text:
+        await interaction.followup.send(
+            "The chapter draft is empty. Generate it again with `/write`.",
+            ephemeral=True,
+        )
+        return
+
+    chapter_record = {
+        "chapter_number": expected_number,
+        "text": chapter_text,
+        "approved_at": now_string(),
+    }
+
+    memory = get_memory(session)
+    memory.setdefault("approved_chapters", []).append(chapter_record)
+
+    completed = expected_number == 10
+
+    # A single transaction saves the chapter and clears the draft.
+    with connect_db() as db:
+        current = db.execute("""
+            SELECT current_draft, current_draft_chapter, story_memory
+            FROM story_sessions
+            WHERE id = ?
+        """, (session["id"],)).fetchone()
+
+        if (
+            not current
+            or current["current_draft"] != session["current_draft"]
+            or current["current_draft_chapter"] != expected_number
+        ):
+            await interaction.followup.send(
+                "The draft changed while you were approving it. "
+                "Nothing was saved. Please run `/write` again.",
+                ephemeral=True,
+            )
+            return
+
+        db.execute("""
+            UPDATE story_sessions
+            SET story_memory = ?,
+                current_draft = NULL,
+                current_draft_chapter = NULL,
+                status = ?,
+                updated_at = ?
+            WHERE id = ?
+        """, (
+            json.dumps(memory, ensure_ascii=False),
+            "completed" if completed else "ready_to_write",
+            now_string(),
+            session["id"],
+        ))
+
+    if completed:
+        embed = discord.Embed(
+            title="🎉 Your Novel Is Complete",
+            description=(
+                f"**{session['chosen_title']}**\n\n"
+                "Chapter 10 has been approved. All ten official chapters "
+                "are saved in your story memory.\n\n"
+                "The novel is complete. Public website publishing "
+                "will be added separately."
+            ),
+            color=EMBED_COLOR,
+        )
+    else:
+        embed = discord.Embed(
+            title=f"Chapter {expected_number} Approved",
+            description=(
+                f"**{session['chosen_title']}**\n\n"
+                "This chapter is now part of the official novel.\n"
+                f"**Progress:** {expected_number}/10 chapters\n\n"
+                "When you're ready, use `/write` for the next chapter."
+            ),
+            color=EMBED_COLOR,
+        )
+
+    await interaction.followup.send(embed=embed, ephemeral=True)
+
+    logging.info(
+        "Approved Chapter %s for session %s",
+        expected_number,
+        session["id"],
+    )
+
+
+# ==================================================
+# BOT STARTUP
+# ==================================================
+
+@bot.event
+async def on_ready():
+    logging.info("Logged in as %s (%s)", bot.user, bot.user.id)
+
+    try:
+        synced = await bot.tree.sync()
+        logging.info("Synced %s slash command(s).", len(synced))
+    except Exception:
+        logging.exception("Failed to sync slash commands")
+
 
 if __name__ == "__main__":
     threading.Thread(
