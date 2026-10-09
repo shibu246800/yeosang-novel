@@ -4,7 +4,7 @@ import json
 import sqlite3
 import threading
 import logging
-from datetime import datetime
+from datetime import datetime, timezone
 from pathlib import Path
 
 import discord
@@ -32,6 +32,7 @@ MAX_IMAGE_SIZE = 15 * 1024 * 1024
 EMBED_COLOR = discord.Color.from_rgb(78, 0, 23)
 
 app = Flask(__name__)
+ai_manager = AIManager()
 
 
 @app.route("/")
@@ -47,7 +48,7 @@ def run_web():
 
 
 # ==================================================
-# DISCORD BOT INITIALIZATION
+# DISCORD BOT
 # ==================================================
 
 intents = discord.Intents.default()
@@ -58,12 +59,18 @@ bot = commands.Bot(
     intents=intents,
 )
 
-ai_manager = AIManager()
-
 
 # ==================================================
 # DATABASE
 # ==================================================
+
+def now_string():
+    return datetime.now(timezone.utc).isoformat()
+
+
+def today_string():
+    return datetime.now(timezone.utc).date().isoformat()
+
 
 def connect_db():
     db = sqlite3.connect(DATABASE_PATH)
@@ -134,16 +141,8 @@ initialize_database()
 
 
 # ==================================================
-# GENERAL HELPERS
+# SESSION HELPERS
 # ==================================================
-
-def now_string():
-    return datetime.utcnow().isoformat()
-
-
-def today_string():
-    return datetime.utcnow().date().isoformat()
-
 
 def get_session(session_id):
     with connect_db() as db:
@@ -162,12 +161,23 @@ def get_todays_session(user_id):
         """, (str(user_id), today_string())).fetchone()
 
 
+def get_memory(session):
+    try:
+        return json.loads(session["story_memory"] or "{}")
+    except (TypeError, json.JSONDecodeError):
+        return {}
+
+
+def get_approved_chapters(session):
+    chapters = get_memory(session).get("approved_chapters", [])
+    return chapters if isinstance(chapters, list) else []
+
+
 def unpack_ai_result(result):
     if isinstance(result, tuple):
-        return (
-            str(result[0]),
-            str(result[1]) if len(result) > 1 else "AI",
-        )
+        text_result = str(result[0])
+        provider = str(result[1]) if len(result) > 1 else "AI"
+        return text_result, provider
 
     return str(result), "AI"
 
@@ -196,19 +206,6 @@ def extract_json(text):
     return json.loads(text[start:end + 1])
 
 
-def get_memory(session):
-    try:
-        return json.loads(session["story_memory"] or "{}")
-    except (TypeError, json.JSONDecodeError):
-        return {}
-
-
-def get_approved_chapters(session):
-    memory = get_memory(session)
-    chapters = memory.get("approved_chapters", [])
-    return chapters if isinstance(chapters, list) else []
-
-
 def save_session(
     user_id,
     board_path,
@@ -230,6 +227,16 @@ def save_session(
     }
 
     with connect_db() as db:
+        existing = db.execute("""
+            SELECT id FROM story_sessions
+            WHERE user_id = ? AND session_date = ?
+        """, (str(user_id), today_string())).fetchone()
+
+        if existing:
+            raise ValueError(
+                "You already have a story session today."
+            )
+
         cursor = db.execute("""
             INSERT INTO story_sessions (
                 user_id, session_date, board_path,
@@ -271,9 +278,7 @@ def get_answers(session_id):
 def save_answer(session_id, question, answer):
     with connect_db() as db:
         row = db.execute("""
-            SELECT story_memory
-            FROM story_sessions
-            WHERE id = ?
+            SELECT story_memory FROM story_sessions WHERE id = ?
         """, (session_id,)).fetchone()
 
         if not row:
@@ -318,12 +323,12 @@ Inspect the collection board carefully.
 Describe visible characters, appearance, clothing, expressions,
 objects, symbols, backgrounds, atmosphere, and possible dynamics.
 
-Separate direct visual observations from interpretations.
+Separate direct observations from interpretations.
 Do not invent names or unsupported facts.
-Do not assume that a visual interpretation is confirmed canon.
+Do not assume visual interpretations are confirmed canon.
 Do not write a story or expose this analysis directly to the user.
 
-This analysis is private and will help develop the novel.
+This analysis will help the user develop an original novel.
 """
 
 
@@ -338,16 +343,16 @@ def evaluate_story(session_id):
         raise ValueError("Story session not found.")
 
     prompt = f"""
-You are Yeosang, a thoughtful novel-writing companion.
+You are Yeosang, a novel-writing companion.
 
 Help the user develop an original novel based on their collection
 board and their answers.
 
-Ask only one question at a time. After each answer, decide whether
-important story information is still missing or the story is ready.
+Ask one question at a time. After every answer, decide whether
+important story information is missing or the story is ready.
 
-Do not use a fixed question count. Use creative judgment for details
-the user leaves open. Respect the user's choices.
+Do not use a fixed question count. Respect user choices and use
+creative judgment for details they leave open.
 
 PRIVATE VISUAL ANALYSIS:
 {session["visual_analysis"][:12000]}
@@ -362,9 +367,9 @@ If more information is needed:
   "status": "ask",
   "question": "One useful question",
   "options": [
-    {{"label": "Choice A", "value": "Meaning of choice A"}},
-    {{"label": "Choice B", "value": "Meaning of choice B"}},
-    {{"label": "Choice C", "value": "Meaning of choice C"}},
+    {{"label": "Choice A", "value": "Meaning of A"}},
+    {{"label": "Choice B", "value": "Meaning of B"}},
+    {{"label": "Choice C", "value": "Meaning of C"}},
     {{"label": "Something else", "value": "Let me choose another direction"}}
   ]
 }}
@@ -385,10 +390,9 @@ If ready:
   "titles": ["Title one", "Title two", "Title three", "Title four"]
 }}
 
-The story plan must support exactly ten chapters.
+The plan must support exactly ten chapters.
 Do not force unnecessary details.
-Return four distinct titles when possible.
-Do not include Markdown outside the JSON.
+Return JSON only, without Markdown.
 """
 
     result, provider = generate_text(prompt)
@@ -397,8 +401,8 @@ Do not include Markdown outside the JSON.
     if data.get("status") == "ask":
         question = str(data.get("question", "")).strip()
         options = data.get("options", [])
+        cleaned = []
 
-        clean_options = []
         for option in options[:5]:
             if not isinstance(option, dict):
                 continue
@@ -407,18 +411,18 @@ Do not include Markdown outside the JSON.
             value = str(option.get("value", "")).strip()
 
             if label and value:
-                clean_options.append({
+                cleaned.append({
                     "label": label[:100],
                     "value": value[:500],
                 })
 
-        if not question or not clean_options:
+        if not question or not cleaned:
             raise ValueError("The AI returned an incomplete question.")
 
         return {
             "status": "ask",
             "question": question,
-            "options": clean_options,
+            "options": cleaned,
             "provider": provider,
         }
 
@@ -436,7 +440,7 @@ Do not include Markdown outside the JSON.
 
         for key in required:
             if not str(plan.get(key, "")).strip():
-                raise ValueError(f"Missing story-plan field: {key}")
+                raise ValueError(f"Missing plan field: {key}")
 
         if not isinstance(titles, list):
             titles = []
@@ -481,9 +485,7 @@ def save_question(session_id, question, options):
 def save_plan(session_id, plan, titles):
     with connect_db() as db:
         row = db.execute("""
-            SELECT story_memory
-            FROM story_sessions
-            WHERE id = ?
+            SELECT story_memory FROM story_sessions WHERE id = ?
         """, (session_id,)).fetchone()
 
         if not row:
@@ -530,7 +532,7 @@ def build_plan_embed(session_id):
         color=EMBED_COLOR,
     )
 
-    fields = [
+    for label, key in [
         ("Premise", "premise"),
         ("Main Characters", "characters"),
         ("Relationships", "relationship"),
@@ -539,9 +541,7 @@ def build_plan_embed(session_id):
         ("Secret or Mystery", "major_secret"),
         ("Ending Direction", "ending"),
         ("Ten-Chapter Journey", "chapter_arc"),
-    ]
-
-    for label, key in fields:
+    ]:
         value = str(plan.get(key, "")).strip()
         if value:
             embed.add_field(
@@ -555,7 +555,7 @@ def build_plan_embed(session_id):
 
 
 # ==================================================
-# STORY QUESTION UI
+# STORY QUESTIONS
 # ==================================================
 
 class StoryQuestionSelect(discord.ui.Select):
@@ -634,7 +634,6 @@ class StoryQuestionSelect(discord.ui.Select):
                         decision["options"],
                     ),
                 )
-
             else:
                 save_plan(
                     self.session_id,
@@ -666,7 +665,7 @@ class StoryQuestionView(discord.ui.View):
 
 
 # ==================================================
-# STORY PLAN REVISION
+# STORY PLAN REVISION AND APPROVAL
 # ==================================================
 
 class StoryRevisionModal(discord.ui.Modal):
@@ -736,7 +735,7 @@ class StoryRevisionModal(discord.ui.Modal):
         except Exception:
             logging.exception("Failed to revise story plan")
             await interaction.followup.send(
-                "I couldn't revise the plan. Please check the Render logs.",
+                "I couldn't revise the plan. Check the Render logs.",
                 ephemeral=True,
             )
 
@@ -899,10 +898,19 @@ class StoryTitleView(discord.ui.View):
 
 
 # ==================================================
-# CHAPTER DISPLAY HELPERS
+# CHAPTER DISPLAY
+# FIX: SEND EACH EMBED IN ITS OWN MESSAGE
 # ==================================================
 
-def split_chapter_text(text, limit=3800):
+def split_chapter_text(text, limit=3500):
+    """
+    Split prose into safe-sized pieces.
+
+    Each embed gets at most 3500 characters of prose, leaving
+    room for its title and footer. Each embed is sent in its
+    own Discord message to avoid the 6000-character combined
+    embed limit per message.
+    """
     text = text.strip()
     chunks = []
 
@@ -926,24 +934,18 @@ def split_chapter_text(text, limit=3800):
 
 def chapter_embeds(session, chapter_number, chapter_text, draft=True):
     title = session["chosen_title"] or "Untitled Novel"
-    heading = f"Chapter {chapter_number}"
-
     chunks = split_chapter_text(chapter_text)
-
-    # Discord permits up to 10 embeds per message.
-    # Keep a chapter within that limit.
-    if len(chunks) > 10:
-        chunks = chunks[:10]
-        chunks[-1] = (
-            chunks[-1][:3500]
-            + "\n\n[Draft shortened to fit Discord's display limit.]"
-        )
-
     embeds = []
 
     for index, chunk in enumerate(chunks):
+        heading = f"Chapter {chapter_number}"
+
         embed = discord.Embed(
-            title=f"{title} | {heading}" if index == 0 else heading,
+            title=(
+                f"{title} | {heading}"
+                if index == 0
+                else f"{heading} | Part {index + 1}"
+            ),
             description=chunk,
             color=EMBED_COLOR,
         )
@@ -952,7 +954,7 @@ def chapter_embeds(session, chapter_number, chapter_text, draft=True):
             embed.set_author(name="Yeosang Novel")
             embed.set_footer(
                 text=(
-                    "Draft • Review and edit before /post"
+                    "Draft • Review before /post"
                     if draft
                     else "Official chapter"
                 )
@@ -965,6 +967,41 @@ def chapter_embeds(session, chapter_number, chapter_text, draft=True):
         embeds.append(embed)
 
     return embeds
+
+
+async def send_chapter_messages(
+    destination,
+    session,
+    chapter_number,
+    chapter_text,
+    draft=True,
+    view=None,
+    content=None,
+):
+    """
+    Send the first chapter section with the controls, then
+    send every remaining section as a separate message.
+
+    Never send the entire list using embeds= because Discord
+    limits combined embed text to 6000 characters per message.
+    """
+    embeds = chapter_embeds(
+        session,
+        chapter_number,
+        chapter_text,
+        draft=draft,
+    )
+
+    first_message = await destination.send(
+        content=content,
+        embed=embeds[0],
+        view=view,
+    )
+
+    for embed in embeds[1:]:
+        await destination.send(embed=embed)
+
+    return first_message
 
 
 # ==================================================
@@ -1001,15 +1038,15 @@ class ChapterEditModal(discord.ui.Modal):
 
         if not session["current_draft"]:
             await interaction.response.send_message(
-                "There is no draft waiting for edits.",
+                "There is no active chapter draft.",
                 ephemeral=True,
             )
             return
 
         if len(session["current_draft"]) > 4000:
             await interaction.response.send_message(
-                "This chapter is too long to edit in one Discord modal. "
-                "You can still approve it with `/post`.",
+                "This chapter exceeds Discord's modal editing limit. "
+                "You can still review it and use `/post` when ready.",
                 ephemeral=True,
             )
             return
@@ -1027,8 +1064,7 @@ class ChapterEditModal(discord.ui.Modal):
             ))
 
         await interaction.response.send_message(
-            "🖤 Your revised draft has been saved. "
-            "Use `/post` when you're ready to approve it.",
+            "🖤 Your revised draft has been saved. Use `/post` when ready.",
             ephemeral=True,
         )
 
@@ -1067,8 +1103,8 @@ class ChapterDraftView(discord.ui.View):
 
         if len(session["current_draft"]) > 4000:
             await interaction.response.send_message(
-                "This chapter exceeds Discord's 4,000-character modal "
-                "limit. You can still review it and use `/post`.",
+                "This chapter is too long for the built-in Discord "
+                "editing window. You can still review and approve it.",
                 ephemeral=True,
             )
             return
@@ -1138,12 +1174,12 @@ async def novel(interaction: discord.Interaction, board: discord.Attachment):
         )
         board_path.write_bytes(image_bytes)
 
-        analysis_result = ai_manager.analyze_image(
+        result = ai_manager.analyze_image(
             image_bytes=image_bytes,
             mime_type=mime_type,
             prompt=VISUAL_ANALYSIS_PROMPT,
         )
-        visual_analysis, provider = unpack_ai_result(analysis_result)
+        visual_analysis, provider = unpack_ai_result(result)
 
         session_id = save_session(
             interaction.user.id,
@@ -1207,7 +1243,6 @@ async def novel(interaction: discord.Interaction, board: discord.Attachment):
 
 # ==================================================
 # /WRITE
-# Generates exactly one unapproved chapter at a time.
 # ==================================================
 
 @bot.tree.command(
@@ -1226,37 +1261,28 @@ async def write(interaction: discord.Interaction):
         )
         return
 
-    if session["plan_status"] != "approved":
+    if session["plan_status"] != "approved" or not session["chosen_title"]:
         await interaction.followup.send(
-            "Approve your story plan and choose a title before using `/write`.",
+            "Approve your story plan and choose a title before `/write`.",
             ephemeral=True,
         )
         return
 
-    if not session["chosen_title"]:
-        await interaction.followup.send(
-            "Choose your novel's title before writing chapters.",
-            ephemeral=True,
-        )
-        return
-
+    # An existing draft is displayed again, not regenerated.
     if session["current_draft"]:
         chapter_number = session["current_draft_chapter"]
-        embeds = chapter_embeds(
+
+        await send_chapter_messages(
+            interaction.followup,
             session,
             chapter_number,
             session["current_draft"],
             draft=True,
-        )
-
-        await interaction.followup.send(
-            content=(
-                f"Your Chapter {chapter_number} draft is still waiting "
-                "for approval. Review it below, edit it if needed, "
-                "then use `/post`."
-            ),
-            embeds=embeds,
             view=ChapterDraftView(session["id"]),
+            content=(
+                f"Your Chapter {chapter_number} draft is waiting for approval. "
+                "Review it, edit it if needed, then use `/post`."
+            ),
         )
         return
 
@@ -1294,26 +1320,24 @@ USER'S STORY CHOICES:
 PREVIOUS APPROVED CHAPTERS:
 {json.dumps(approved, ensure_ascii=False)}
 
-CHAPTER NUMBER:
-{chapter_number} of 10
+CHAPTER NUMBER: {chapter_number} of 10
 
 INSTRUCTIONS:
-- Write only Chapter {chapter_number}, not multiple chapters.
+- Write only Chapter {chapter_number}.
 - Continue naturally from the previous approved chapter.
-- For Chapter 1, establish the setting, characters, atmosphere,
-  and central narrative without rushing.
-- Follow the approved premise, relationships, conflict, and ending.
-- Maintain consistent character personalities and established facts.
+- Chapter 1 should establish the setting, characters, atmosphere,
+  and conflict without rushing.
+- Follow the approved premise, relationships, and ending direction.
+- Maintain character consistency and established facts.
 - Do not contradict previous approved chapters.
-- Do not reveal secrets earlier than the story plan intends.
+- Do not reveal secrets earlier than planned.
 - Use immersive prose, meaningful dialogue, and developed scenes.
 - Avoid summaries in place of actual scenes.
-- Avoid one-line prose paragraphs throughout the chapter.
-- Do not add an out-of-story explanation or ask the user questions.
-- Do not write the next chapter.
-- Return the chapter title followed by the complete chapter prose.
+- Avoid making the entire chapter a sequence of one-line paragraphs.
+- Do not add an out-of-story explanation or ask questions.
+- Return the chapter heading followed by complete chapter prose.
 - Aim for a substantial chapter with a natural beginning and ending.
-- The chapter should feel like part of one continuous novel.
+- Do not write the next chapter.
 """
 
     try:
@@ -1323,8 +1347,8 @@ INSTRUCTIONS:
         if not chapter_text:
             raise ValueError("The AI returned an empty chapter.")
 
-        # Save the draft before displaying it, so a failed Discord
-        # response does not lose the generated text.
+        # Save before sending so the generated draft is not lost
+        # if Discord temporarily rejects or fails to deliver a message.
         with connect_db() as db:
             db.execute("""
                 UPDATE story_sessions
@@ -1341,21 +1365,21 @@ INSTRUCTIONS:
             ))
 
         refreshed = get_session(session["id"])
-        embeds = chapter_embeds(
+
+        # FIX: Send each section in its own message.
+        # Never send embeds=embeds for the whole chapter.
+        await send_chapter_messages(
+            interaction.followup,
             refreshed,
             chapter_number,
             chapter_text,
             draft=True,
-        )
-
-        await interaction.followup.send(
+            view=ChapterDraftView(session["id"]),
             content=(
                 f"📖 **Chapter {chapter_number} draft is ready.**\n"
-                "Review it before approving. Use the Edit Draft button "
-                "for short edits, or `/post` when you're satisfied."
+                "Review the chapter before approving it. Use the Edit Draft "
+                "button for short edits, or `/post` when you're satisfied."
             ),
-            embeds=embeds,
-            view=ChapterDraftView(session["id"]),
         )
 
         logging.info(
@@ -1366,17 +1390,18 @@ INSTRUCTIONS:
         )
 
     except Exception:
-        logging.exception("Failed to generate chapter")
+        logging.exception("Failed to generate or display chapter")
+
         await interaction.followup.send(
-            "I couldn't generate the chapter. Your existing approved "
-            "chapters have not been changed. Please check the Render logs.",
+            "I couldn't finish displaying the chapter. The generated draft "
+            "was saved if generation completed. Run `/write` to display "
+            "the saved draft again, and check the Render logs if it fails.",
             ephemeral=True,
         )
 
 
 # ==================================================
 # /POST
-# Approves and saves the current draft as official.
 # ==================================================
 
 @bot.tree.command(
@@ -1414,17 +1439,10 @@ async def post(interaction: discord.Interaction):
     expected_number = len(approved) + 1
     draft_number = session["current_draft_chapter"]
 
-    if draft_number != expected_number:
+    if draft_number != expected_number or expected_number > 10:
         await interaction.followup.send(
-            "The draft number doesn't match the next chapter. "
-            "Nothing was posted. Please check the Render logs.",
-            ephemeral=True,
-        )
-        return
-
-    if expected_number > 10:
-        await interaction.followup.send(
-            "All 10 chapters are already approved.",
+            "The draft number does not match the next chapter. "
+            "Nothing was approved. Please check the Render logs.",
             ephemeral=True,
         )
         return
@@ -1433,7 +1451,7 @@ async def post(interaction: discord.Interaction):
 
     if not chapter_text:
         await interaction.followup.send(
-            "The chapter draft is empty. Generate it again with `/write`.",
+            "The draft is empty. Generate it again with `/write`.",
             ephemeral=True,
         )
         return
@@ -1449,10 +1467,9 @@ async def post(interaction: discord.Interaction):
 
     completed = expected_number == 10
 
-    # A single transaction saves the chapter and clears the draft.
     with connect_db() as db:
         current = db.execute("""
-            SELECT current_draft, current_draft_chapter, story_memory
+            SELECT current_draft, current_draft_chapter
             FROM story_sessions
             WHERE id = ?
         """, (session["id"],)).fetchone()
@@ -1464,7 +1481,7 @@ async def post(interaction: discord.Interaction):
         ):
             await interaction.followup.send(
                 "The draft changed while you were approving it. "
-                "Nothing was saved. Please run `/write` again.",
+                "Nothing was saved. Run `/write` again.",
                 ephemeral=True,
             )
             return
@@ -1491,8 +1508,7 @@ async def post(interaction: discord.Interaction):
                 f"**{session['chosen_title']}**\n\n"
                 "Chapter 10 has been approved. All ten official chapters "
                 "are saved in your story memory.\n\n"
-                "The novel is complete. Public website publishing "
-                "will be added separately."
+                "Public website publishing will be added separately."
             ),
             color=EMBED_COLOR,
         )
@@ -1533,10 +1549,7 @@ async def on_ready():
 
 
 if __name__ == "__main__":
-    threading.Thread(
-        target=run_web,
-        daemon=True,
-    ).start()
+    threading.Thread(target=run_web, daemon=True).start()
 
     token = os.environ.get("DISCORD_TOKEN")
 
